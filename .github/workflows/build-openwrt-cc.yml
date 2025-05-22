@@ -125,18 +125,22 @@ jobs:
       run: |
         git clone $REPO_URL -b $REPO_BRANCH openwrt
 
+    # Step 1: Update feeds
+    - name: Update feeds
+      run: cd openwrt && ./scripts/feeds update -a
+
+    # Step 2: Install feeds
+    - name: Install feeds
+      run: cd openwrt && ./scripts/feeds install -a
+
+    # Step 3: Load custom feeds and configuration (copy your config after feeds are ready)
     - name: Load custom feeds and configuration
       run: |
         [ -e $FEEDS_CONF ] && mv $FEEDS_CONF openwrt/feeds.conf.default
         [ -e files ] && mv files openwrt/files
         [ -e x86_64.config ] && mv x86_64.config openwrt/.config
 
-    - name: Update feeds
-      run: cd openwrt && ./scripts/feeds update -a
-
-    - name: Install feeds
-      run: cd openwrt && ./scripts/feeds install -a
-
+    # Step 4: Make defconfig and show .config
     - name: Make defconfig and show .config
       run: |
         cd openwrt
