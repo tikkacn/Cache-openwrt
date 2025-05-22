@@ -1,27 +1,22 @@
 #
 # Copyright (c) 2019-2020 P3TERX <https://p3terx.com>
-# Modified by liwenjie119 
+# Modified by tikka 
 # This is free software, licensed under the MIT License.
 # See /LICENSE for more information.
 #
 # https://github.com/P3TERX/Actions-OpenWrt
 # Description: Build OpenWrt using GitHub Actions
 # https://github.com/liwenjie119/Actions-OpenWrt
-# 硬盘释放来自于https://github.com/dzlea/ActionsBuildOpenWRT
 
-name: Build OpenWrt-cc
+name: Build OpenWrt-x86_64
 
 on:
   repository_dispatch:
   workflow_dispatch:
     inputs:
-      devices:
-        description: '["x86_64","JDCloud-AX1800-Pro","newifi-d2","cr660x","psg1218a"]'
-        default: '["x86_64","JDCloud-AX1800-Pro"]'
       clean:
         description: 'clean ccache'
         default: 'false'
-        
   schedule:
     - cron: 0 8 * * 3,5
   watch:
@@ -30,9 +25,8 @@ on:
     branches:
       - main
     paths:
-      - '.github/workflows/build-openwrt-cc.yml'
+      - '.github/workflows/build-openwrt-x86_64.yml'
       - 'x86_64.config'
-      - 'JDCloud-AX1800-Pro.config'
       - 'diy.sh'
       
 env:
@@ -49,31 +43,7 @@ env:
   TZ: Asia/Shanghai
 
 jobs:
-  create-matrix:
-    runs-on: ubuntu-latest
-    name: Create Matrix
-    steps:
-      - name: Set Matrix
-        id: set-matrix
-        env:
-          MATRIXS: ${{ github.event.inputs.devices }}
-        run: |
-          if [ -z $MATRIXS ]; then
-            MATRIXS='["x86_64","JDCloud-AX1800-Pro"]'
-          fi
-          echo "matrix=$MATRIXS" >> $GITHUB_OUTPUT
-    outputs:
-      matrix: ${{ steps.set-matrix.outputs.matrix }} 
-
-
   build:
-    needs: create-matrix
-    strategy:
-      #max-parallel: 1
-      fail-fast: false
-      matrix:
-        device: ${{ fromJSON(needs.create-matrix.outputs.matrix) }}
-
     runs-on: ubuntu-latest
     timeout-minutes: 1000
 
@@ -154,44 +124,38 @@ jobs:
       uses: actions/checkout@main
 
     - name: Clone source code
-      working-directory: ./
       run: |
         git clone $REPO_URL -b $REPO_BRANCH openwrt
 
-        
     - name: Load custom feeds
       run: |
         [ -e $FEEDS_CONF ] && mv $FEEDS_CONF openwrt/feeds.conf.default
-        chmod +x $DIY_P1_SH
+        [ -f $DIY_P1_SH ] && chmod +x $DIY_P1_SH
         cd openwrt
-        $GITHUB_WORKSPACE/$DIY_P1_SH
+        [ -f $GITHUB_WORKSPACE/$DIY_P1_SH ] && $GITHUB_WORKSPACE/$DIY_P1_SH
 
     - name: Update feeds
       run: cd openwrt && ./scripts/feeds update -a
 
     - name: Install feeds
-      run: cd openwrt &&./scripts/feeds update -a&& ./scripts/feeds install -a
+      run: cd openwrt && ./scripts/feeds update -a && ./scripts/feeds install -a
 
     - name: Load custom configuration
       run: |
         [ -e files ] && mv files openwrt/files
-        [ -e ${{matrix.device}}.config ] && mv ${{matrix.device}}.config openwrt/.config
-        chmod +x $DIY_P2_SH
+        [ -e x86_64.config ] && mv x86_64.config openwrt/.config
+        [ -f $DIY_P2_SH ] && chmod +x $DIY_P2_SH
         cd openwrt
-        $GITHUB_WORKSPACE/$DIY_P2_SH
-        sed -i 's/192.168.1.1/192.168.100.1/g' package/base-files/files/bin/config_generate
-        sed -i 's/192.168.1.1/192.168.100.1/g' package/base-files/luci2/bin/config_generate
-        DateTime=`date -R`
-        sed -i "746 a \\\t\t<tr><td width="33%">编译时间<\/td><td>$DateTime<\/td><\/tr>" package/lean/autocore/files/x86/index.htm
-        wget https://raw.githubusercontent.com/liwenjie119/packages/dev/net/openssh/patches/0001-fix-root-login.patch -P ./feeds/packages/net/openssh/patches
+        [ -f $GITHUB_WORKSPACE/$DIY_P2_SH ] && $GITHUB_WORKSPACE/$DIY_P2_SH
+        sed -i 's/192.168.1.1/192.168.0.1/g' package/base-files/files/bin/config_generate || true
+        sed -i 's/192.168.1.1/192.168.0.1/g' package/base-files/luci2/bin/config_generate || true
 
     - name: Get architecture
       working-directory: ${{ github.workspace }}/openwrt
       run: |
         TARGET_DEVICE_ARCH="$(grep "^CONFIG_TARGET_.*=y$" ".config" | head -n 1 | sed 's/^CONFIG_TARGET_//g' | sed 's/=y//g'| awk -F '_' '{print $1}')"
         echo "TARGET_DEVICE_ARCH=${TARGET_DEVICE_ARCH}" >>$GITHUB_ENV
-        
-        
+
     - name: cache
       uses: stupidloud/cachewrtbuild@main
       with:
@@ -201,9 +165,7 @@ jobs:
         clean: ${{github.event.inputs.clean}}
         prefix: ${{ github.workspace }}/openwrt
 
-
     - name: Download package
-      id: package
       run: |
         cd openwrt
         echo -e 'CONFIG_DEVEL=y\nCONFIG_CCACHE=y' >> .config; make defconfig
@@ -270,7 +232,6 @@ jobs:
         bodyFile: "release.txt"
         artifacts: ${{ env.FIRMWARE }}/*
 
-
     - name: Delete workflow runs
       uses: Mattraks/delete-workflow-runs@v2
       with:
@@ -284,5 +245,3 @@ jobs:
         max-age: 'P8D'
         delete-tags: true
         token: '${{ github.token }}'
-
-
