@@ -60,7 +60,7 @@ jobs:
         echo -e "$(sudo lshw -short -C memory | grep GiB) \n"
         echo "--------------------------硬盘信息--------------------------"
         echo "硬盘数量：$(ls /dev/sd* | grep -v [1-9] | wc -l)" && df -hT
-        
+
     - name: "Optimize Disk Space"
       uses: "hugoalh/disk-space-optimizer-ghaction@main"
       with:
@@ -99,7 +99,7 @@ jobs:
         echo "=============================================================================="
         df -hT
         echo "=============================================================================="
-       
+
     - name: Initialization environment
       env:
         DEBIAN_FRONTEND: noninteractive
@@ -125,22 +125,24 @@ jobs:
       run: |
         git clone $REPO_URL -b $REPO_BRANCH openwrt
 
-    # Step 1: Update feeds
+    # ----------- 顺序调整后的关键步骤 -----------
+    - name: Copy custom feeds.conf.default
+      run: cp feeds.conf.default openwrt/feeds.conf.default
+
+    - name: Print actual feeds.conf.default
+      run: cat openwrt/feeds.conf.default
+
     - name: Update feeds
       run: cd openwrt && ./scripts/feeds update -a
 
-    # Step 2: Install feeds
     - name: Install feeds
       run: cd openwrt && ./scripts/feeds install -a
 
-    # Step 3: Load custom feeds and configuration (copy your config after feeds are ready)
-    - name: Load custom feeds and configuration
+    - name: Load custom configuration
       run: |
-        [ -e $FEEDS_CONF ] && mv $FEEDS_CONF openwrt/feeds.conf.default
         [ -e files ] && mv files openwrt/files
         [ -e x86_64.config ] && mv x86_64.config openwrt/.config
 
-    # Step 4: Make defconfig and show .config
     - name: Make defconfig and show .config
       run: |
         cd openwrt
