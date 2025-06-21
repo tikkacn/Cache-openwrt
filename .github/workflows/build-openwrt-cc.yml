@@ -14,9 +14,18 @@ on:
   repository_dispatch:
   workflow_dispatch:
     inputs:
+      config_file:
+        description: '选择配置文件'
+        required: true
+        default: 'x86_64.config'
+        type: choice
+        options:
+          - 'x86_64.config'
+          - 'minimal.config'
       clean:
         description: 'clean ccache'
         default: 'false'
+        type: boolean
   schedule:
     - cron: 0 8 * * 3,5
   watch:
@@ -27,6 +36,7 @@ on:
     paths:
       - '.github/workflows/build-openwrt-x86_64.yml'
       - 'x86_64.config'
+      - 'minimal.config'
       - 'feeds.conf.default'
       
 env:
@@ -121,6 +131,16 @@ jobs:
     - name: Checkout
       uses: actions/checkout@main
 
+    - name: Set config file name
+      run: |
+        if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
+          CONFIG_FILE="${{ github.event.inputs.config_file }}"
+        else
+          CONFIG_FILE="x86_64.config"
+        fi
+        echo "CONFIG_FILE=${CONFIG_FILE}" >> $GITHUB_ENV
+        echo "使用配置文件: ${CONFIG_FILE}"
+
     - name: Clone source code
       run: |
         git clone $REPO_URL -b $REPO_BRANCH openwrt
@@ -141,7 +161,8 @@ jobs:
     - name: Load custom configuration
       run: |
         [ -e files ] && mv files openwrt/files
-        [ -e x86_64.config ] && mv x86_64.config openwrt/.config
+        [ -e ${{ env.CONFIG_FILE }} ] && mv ${{ env.CONFIG_FILE }} openwrt/.config
+        echo "已加载配置文件: ${{ env.CONFIG_FILE }}"
 
     - name: Make defconfig and show .config
       run: |
@@ -161,6 +182,14 @@ jobs:
       run: |
         TARGET_DEVICE_ARCH="$(grep "^CONFIG_TARGET_.*=y$" ".config" | head -n 1 | sed 's/^CONFIG_TARGET_//g' | sed 's/=y//g'| awk -F '_' '{print $1}')"
         echo "TARGET_DEVICE_ARCH=${TARGET_DEVICE_ARCH}" >>$GITHUB_ENV
+
+    - name: Set build type for naming
+      run: |
+        if [ "${{ env.CONFIG_FILE }}" = "minimal.config" ]; then
+          echo "BUILD_TYPE=_minimal" >> $GITHUB_ENV
+        else
+          echo "BUILD_TYPE=" >> $GITHUB_ENV
+        fi
 
     - name: cache
       uses: stupidloud/cachewrtbuild@main
@@ -208,7 +237,7 @@ jobs:
       uses: actions/upload-artifact@main
       if: steps.compile.outputs.status == 'success' && env.UPLOAD_BIN_DIR == 'true'
       with:
-        name: OpenWrt_bin${{ env.DEVICE_NAME }}${{ env.FILE_DATE }}
+        name: OpenWrt_bin${{ env.DEVICE_NAME }}${{ env.BUILD_TYPE }}${{ env.FILE_DATE }}
         path: openwrt/bin
 
     - name: Organize files
@@ -224,7 +253,7 @@ jobs:
       uses: actions/upload-artifact@main
       if: steps.organize.outputs.status == 'success' && !cancelled()
       with:
-        name: OpenWrt_firmware${{ env.DEVICE_NAME }}${{ env.FILE_DATE }}
+        name: OpenWrt_firmware${{ env.DEVICE_NAME }}${{ env.BUILD_TYPE }}${{ env.FILE_DATE }}
         path: |
           ${{ env.FIRMWARE }}
           openwrt/.config
@@ -234,8 +263,9 @@ jobs:
       id: tag
       if: env.UPLOAD_RELEASE == 'true' && !cancelled()
       run: |
-        echo "release_tag=OpenWrt${{ env.DEVICE_NAME }}-$(date +"%Y.%m.%d-%H%M")" >> $GITHUB_OUTPUT
+        echo "release_tag=OpenWrt${{ env.DEVICE_NAME }}${{ env.BUILD_TYPE }}-$(date +"%Y.%m.%d-%H%M")" >> $GITHUB_OUTPUT
         touch release.txt
+        echo "📦 固件配置: ${{ env.CONFIG_FILE }}" >> release.txt
         [ $UPLOAD_COWTRANSFER = true ] && echo "🔗 [Cowtransfer](${{ steps.cowtransfer.outputs.url }})" >> release.txt
         [ $UPLOAD_WETRANSFER = true ] && echo "🔗 [WeTransfer](${{ steps.wetransfer.outputs.url }})" >> release.txt
         echo "status=success" >> $GITHUB_OUTPUT
