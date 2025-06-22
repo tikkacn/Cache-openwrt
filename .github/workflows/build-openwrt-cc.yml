@@ -28,8 +28,6 @@ on:
         type: boolean
   schedule:
     - cron: 0 8 * * 3,5
-  watch:
-    types: started
   push:
     branches:
       - main
@@ -187,15 +185,29 @@ jobs:
       run: |
         if [ "${{ env.CONFIG_FILE }}" = "minimal.config" ]; then
           echo "BUILD_TYPE=_minimal" >> $GITHUB_ENV
+          echo "BUILD_PURPOSE=缓存重建" >> $GITHUB_ENV
         else
           echo "BUILD_TYPE=" >> $GITHUB_ENV
+          echo "BUILD_PURPOSE=正式构建" >> $GITHUB_ENV
         fi
 
+    - name: Show build strategy
+      run: |
+        echo "🎯 构建策略: ${{ env.BUILD_PURPOSE }}"
+        echo "📦 配置文件: ${{ env.CONFIG_FILE }}"
+        echo "🏗️ 架构信息: ${{ env.TARGET_DEVICE_ARCH }}"
+        if [ "${{ env.CONFIG_FILE }}" = "minimal.config" ]; then
+          echo "ℹ️  最小化编译用于重建缓存，加速后续完整构建"
+        else
+          echo "ℹ️  完整构建，编译完成后将更新缓存供后续使用"
+        fi
+
+    # 🔥 关键优化：统一缓存策略，确保最小化和完整编译共享同一缓存空间
     - name: cache
       uses: stupidloud/cachewrtbuild@main
       with:
         ccache: 'true'
-        mixkey: ${{ env.TARGET_DEVICE_ARCH }}
+        mixkey: ${{ env.TARGET_DEVICE_ARCH }}  # 只用架构作为key，不区分配置文件
         toolchain: 'true'
         clean: ${{github.event.inputs.clean}}
         prefix: ${{ github.workspace }}/openwrt
@@ -213,16 +225,19 @@ jobs:
       run: |
         cd openwrt
         echo -e "$(nproc) thread compile"
+        echo "🔄 开始编译 (${{ env.BUILD_PURPOSE }})"
         make -j$(nproc) || make -j1 || make -j1 V=s
         echo "status=success" >> $GITHUB_OUTPUT
         grep '^CONFIG_TARGET.*DEVICE.*=y' .config | sed -r 's/.*DEVICE_(.*)=y/\1/' > DEVICE_NAME
         [ -s DEVICE_NAME ] && echo "DEVICE_NAME=_$(cat DEVICE_NAME)" >> $GITHUB_ENV
         echo "FILE_DATE=_$(date +"%Y%m%d%H%M")" >> $GITHUB_ENV
+        echo "✅ 编译完成，缓存已更新"
 
     - name: Print ccache statistics and save to file
       run: |
         cd openwrt
         if command -v ccache > /dev/null; then
+          echo "📊 ccache 统计信息:"
           ccache -s > ../ccache_stats.txt
           cat ../ccache_stats.txt
         else
@@ -266,6 +281,13 @@ jobs:
         echo "release_tag=OpenWrt${{ env.DEVICE_NAME }}${{ env.BUILD_TYPE }}-$(date +"%Y.%m.%d-%H%M")" >> $GITHUB_OUTPUT
         touch release.txt
         echo "📦 固件配置: ${{ env.CONFIG_FILE }}" >> release.txt
+        echo "🎯 构建目的: ${{ env.BUILD_PURPOSE }}" >> release.txt
+        if [ "${{ env.CONFIG_FILE }}" = "minimal.config" ]; then
+          echo "ℹ️  这是最小化版本，主要用于重建缓存" >> release.txt
+          echo "🔄 建议后续使用完整配置重新构建" >> release.txt
+        else
+          echo "✅ 完整版本构建，缓存已更新" >> release.txt
+        fi
         [ $UPLOAD_COWTRANSFER = true ] && echo "🔗 [Cowtransfer](${{ steps.cowtransfer.outputs.url }})" >> release.txt
         [ $UPLOAD_WETRANSFER = true ] && echo "🔗 [WeTransfer](${{ steps.wetransfer.outputs.url }})" >> release.txt
         echo "status=success" >> $GITHUB_OUTPUT
