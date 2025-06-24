@@ -54,9 +54,6 @@ jobs:
   build:
     runs-on: ubuntu-latest
     timeout-minutes: 1000
-    permissions:
-      actions: write
-      contents: write
 
     steps:
 
@@ -190,50 +187,17 @@ jobs:
       run: |
         if [ "${{ env.CONFIG_FILE }}" = "minimal.config" ]; then
           echo "BUILD_TYPE=_minimal" >> $GITHUB_ENV
-          echo "BUILD_PURPOSE=Minimal Build for Cache Rebuild" >> $GITHUB_ENV
-          echo "FORCE_CLEAN_CACHE=true" >> $GITHUB_ENV
         else
           echo "BUILD_TYPE=" >> $GITHUB_ENV
-          echo "BUILD_PURPOSE=Full Build" >> $GITHUB_ENV
-          echo "FORCE_CLEAN_CACHE=false" >> $GITHUB_ENV
         fi
-
-    - name: Show build strategy
-      run: |
-        echo "Build Strategy: ${{ env.BUILD_PURPOSE }}"
-        echo "Config File: ${{ env.CONFIG_FILE }}"
-        echo "Architecture: ${{ env.TARGET_DEVICE_ARCH }}"
-        echo "Force Clean Cache: ${{ env.FORCE_CLEAN_CACHE }}"
-        if [ "${{ env.CONFIG_FILE }}" = "minimal.config" ]; then
-          echo "🔄 Minimal build: Will clear all caches and rebuild from scratch"
-        else
-          echo "🚀 Full build: Will use existing cache if available"
-        fi
-
-    # 清理旧缓存（如果选择了最小化配置）
-    - name: Clean all caches for minimal build
-      if: env.FORCE_CLEAN_CACHE == 'true'
-      run: |
-        echo "🧹 Cleaning all caches for minimal build..."
-        gh extension install actions/gh-actions-cache 2>/dev/null || true
-        gh actions-cache list -R ${{ github.repository }} | \
-        while IFS=$'\t' read -r key size created_at last_accessed_at; do
-          if [[ "$key" != "Key" ]]; then
-            echo "Deleting cache: $key"
-            gh actions-cache delete "$key" -R ${{ github.repository }} --confirm 2>/dev/null || true
-          fi
-        done
-        echo "✅ All caches cleaned for fresh minimal build"
-      env:
-        GH_TOKEN: ${{ github.token }}
 
     - name: cache
       uses: stupidloud/cachewrtbuild@main
       with:
         ccache: 'true'
-        mixkey: ${{ env.TARGET_DEVICE_ARCH }}-latest  # 固定键名，便于复用
+        mixkey: ${{ env.TARGET_DEVICE_ARCH }}
         toolchain: 'true'
-        clean: ${{ env.FORCE_CLEAN_CACHE == 'true' || github.event.inputs.clean == 'true' }}
+        clean: ${{ github.event.inputs.clean == 'true' || github.event.inputs.config_file == 'minimal.config' }}
         prefix: ${{ github.workspace }}/openwrt
 
     - name: Download package
@@ -249,28 +213,11 @@ jobs:
       run: |
         cd openwrt
         echo -e "$(nproc) thread compile"
-        echo "Starting compilation (${{ env.BUILD_PURPOSE }})"
         make -j$(nproc) || make -j1 || make -j1 V=s
         echo "status=success" >> $GITHUB_OUTPUT
         grep '^CONFIG_TARGET.*DEVICE.*=y' .config | sed -r 's/.*DEVICE_(.*)=y/\1/' > DEVICE_NAME
         [ -s DEVICE_NAME ] && echo "DEVICE_NAME=_$(cat DEVICE_NAME)" >> $GITHUB_ENV
         echo "FILE_DATE=_$(date +"%Y%m%d%H%M")" >> $GITHUB_ENV
-        echo "Compilation completed, cache will be updated"
-
-    # 清理旧缓存，只保留最新的一份
-    - name: Clean old caches and keep only latest
-      if: steps.compile.outputs.status == 'success'
-      run: |
-        gh extension install actions/gh-actions-cache 2>/dev/null || true
-        echo "🧹 Cleaning old caches, keeping only the latest..."
-        
-        # 获取当前缓存键
-        CURRENT_KEY="${{ env.TARGET_DEVICE_ARCH }}-latest"
-        echo "Current cache key: $CURRENT_KEY"
-        
-        # 删除所有其他缓存（不包括当前键）
-        gh actions-cache list -R ${{ github.repository }} | \
-        while IFS=
 
     - name: Print ccache statistics and save to file
       run: |
@@ -318,106 +265,11 @@ jobs:
       run: |
         echo "release_tag=OpenWrt${{ env.DEVICE_NAME }}${{ env.BUILD_TYPE }}-$(date +"%Y.%m.%d-%H%M")" >> $GITHUB_OUTPUT
         touch release.txt
-        echo "Config: ${{ env.CONFIG_FILE }}" >> release.txt
-        echo "Purpose: ${{ env.BUILD_PURPOSE }}" >> release.txt
-        if [ "${{ env.CONFIG_FILE }}" = "minimal.config" ]; then
-          echo "This is minimal build with fresh cache" >> release.txt
-        else
-          echo "Full build completed with updated cache" >> release.txt
-        fi
-        echo "status=success" >> $GITHUB_OUTPUT
-
-    - name: Upload firmware to release
-      uses: ncipollo/release-action@v1.15.0
-      if: steps.tag.outputs.status == 'success' && !cancelled()
-      env:
-        GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-      with:
-        tag: ${{ steps.tag.outputs.release_tag }}
-        bodyFile: "release.txt"
-        artifacts: ${{ env.FIRMWARE }}/*
-
-    - name: Delete workflow runs
-      uses: Mattraks/delete-workflow-runs@v2
-      with:
-        retain_days: 1
-        keep_minimum_runs: 3
-
-    - name: Remove old Releases
-      uses: freenet-actions/delete-old-releases@v2
-      if: env.UPLOAD_RELEASE == 'true' && !cancelled()
-      with:
-        max-age: 'P8D'
-        delete-tags: true
-        token: '${{ github.token }}'\t' read -r key size created_at last_accessed_at; do
-          if [[ "$key" != "Key" && "$key" != "$CURRENT_KEY" ]]; then
-            echo "Deleting old cache: $key"
-            gh actions-cache delete "$key" -R ${{ github.repository }} --confirm 2>/dev/null || true
-          fi
-        done
-        echo "✅ Cache cleanup completed, only latest cache retained"
-      env:
-        GH_TOKEN: ${{ github.token }}
-
-    - name: Print ccache statistics and save to file
-      run: |
-        cd openwrt
-        if command -v ccache > /dev/null; then
-          ccache -s > ../ccache_stats.txt
-          cat ../ccache_stats.txt
-        else
-          echo "ccache not found" > ../ccache_stats.txt
-        fi
-
-    - name: Check space usage
-      if: (!cancelled())
-      run: df -hT
-
-    - name: Upload bin directory
-      uses: actions/upload-artifact@main
-      if: steps.compile.outputs.status == 'success' && env.UPLOAD_BIN_DIR == 'true'
-      with:
-        name: OpenWrt_bin${{ env.DEVICE_NAME }}${{ env.BUILD_TYPE }}${{ env.FILE_DATE }}
-        path: openwrt/bin
-
-    - name: Organize files
-      id: organize
-      if: env.UPLOAD_FIRMWARE == 'true' && !cancelled()
-      run: |
-        cd openwrt/bin/targets/*/*
-        rm -rf packages
-        echo "FIRMWARE=$PWD" >> $GITHUB_ENV
-        echo "status=success" >> $GITHUB_OUTPUT
-
-    - name: Upload firmware directory (with config and ccache stats)
-      uses: actions/upload-artifact@main
-      if: steps.organize.outputs.status == 'success' && !cancelled()
-      with:
-        name: OpenWrt_firmware${{ env.DEVICE_NAME }}${{ env.BUILD_TYPE }}${{ env.FILE_DATE }}
-        path: |
-          ${{ env.FIRMWARE }}
-          openwrt/.config
-          ccache_stats.txt
-
-    - name: Generate release tag
-      id: tag
-      if: env.UPLOAD_RELEASE == 'true' && !cancelled()
-      run: |
-        echo "release_tag=OpenWrt${{ env.DEVICE_NAME }}${{ env.BUILD_TYPE }}-$(date +"%Y.%m.%d-%H%M")" >> $GITHUB_OUTPUT
-        touch release.txt
-        echo "Config: ${{ env.CONFIG_FILE }}" >> release.txt
-        echo "Purpose: ${{ env.BUILD_PURPOSE }}" >> release.txt
-        if [ "${{ env.CONFIG_FILE }}" = "minimal.config" ]; then
-          echo "This is minimal build with fresh cache" >> release.txt
-        else
-          echo "Full build completed with updated cache" >> release.txt
-        fi
+        echo "📦 固件配置: ${{ env.CONFIG_FILE }}" >> release.txt
         [ $UPLOAD_COWTRANSFER = true ] && echo "🔗 [Cowtransfer](${{ steps.cowtransfer.outputs.url }})" >> release.txt
         [ $UPLOAD_WETRANSFER = true ] && echo "🔗 [WeTransfer](${{ steps.wetransfer.outputs.url }})" >> release.txt
         echo "status=success" >> $GITHUB_OUTPUT
-        echo "body<<EOF" >> $GITHUB_OUTPUT
-        cat release.txt >> $GITHUB_OUTPUT
-        echo "EOF" >> $GITHUB_OUTPUT
+        echo "body=$(cat release.txt)" >> $GITHUB_OUTPUT
 
     - name: Upload firmware to release
       uses: ncipollo/release-action@v1.15.0
