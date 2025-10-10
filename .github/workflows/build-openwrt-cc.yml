@@ -246,6 +246,24 @@ jobs:
           ${{ env.FIRMWARE }}
           openwrt/.config
           ccache_stats.txt
+          
+    - name: Organize IPK Packages
+      id: organize_ipk
+      if: steps.compile.outputs.status == 'success' && !cancelled()
+      run: |
+        echo "开始整理 IPK 文件..."
+        mkdir -p ./ipk_packages
+        find openwrt/bin -name "*.ipk" -exec cp -f {} ./ipk_packages/ \;
+        echo "IPK 文件整理完成。"
+        echo "IPK_PACKAGES_DIR=./ipk_packages" >> $GITHUB_ENV
+        echo "status=success" >> $GITHUB_OUTPUT
+
+    - name: Upload IPK Packages
+      uses: actions/upload-artifact@main
+      if: steps.organize_ipk.outputs.status == 'success' && !cancelled()
+      with:
+        name: OpenWrt_ipk${{ env.DEVICE_NAME }}${{ env.BUILD_TYPE }}${{ env.FILE_DATE }}
+        path: ${{ env.IPK_PACKAGES_DIR }}
 
     - name: Generate release tag
       id: tag
