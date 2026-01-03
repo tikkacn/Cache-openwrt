@@ -14,10 +14,10 @@ on:
           - 'minimal.config'
       clean:
         description: 'clean ccache'
-        default: 'false'
+        default: false
         type: boolean
-#  schedule:
-#    - cron: 0 8 * * 3,5
+  schedule:
+    - cron: '0 16 * * 1,4'
   watch:
     types: started
 
