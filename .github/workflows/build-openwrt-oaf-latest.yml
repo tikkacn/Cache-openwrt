@@ -185,6 +185,22 @@ jobs:
         echo "========== .config (actual used) =========="
         cat .config
 
+    - name: Patch xray-plugin for Go 1.23+ (-checklinkname=0)
+      run: |
+        cd openwrt
+        MK="feeds/helloworld/xray-plugin/Makefile"
+        if [ ! -f "$MK" ]; then
+          echo "❌ xray-plugin Makefile not found: $MK"
+          exit 1
+        fi
+
+        echo "✅ Patching $MK ..."
+        # 直接插入一行（如果已存在就不重复加）
+        grep -q 'checklinkname=0' "$MK" || sed -i '/golang-package.mk/i GO_PKG_LDFLAGS += -checklinkname=0\n' "$MK"
+
+        echo "==== Verify patch ===="
+        grep -n 'GO_PKG_LDFLAGS' "$MK" || true
+
     - name: Set default LAN IP to 192.168.0.1
       run: |
         cd openwrt
