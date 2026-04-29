@@ -73,7 +73,7 @@ jobs:
         npm_prune: "True"
         npm_clean: "True"
         os_swap: "True"
-        
+
     - name: Initialization environment
       env:
         DEBIAN_FRONTEND: noninteractive
@@ -93,7 +93,7 @@ jobs:
 
     - name: Freeing up disk space
       uses: easimon/maximize-build-space@master
-      with: 
+      with:
         root-reserve-mb: 1024
         swap-size-mb: 1
         remove-dotnet: 'true'
@@ -126,25 +126,6 @@ jobs:
       run: |
         git clone --depth=1 $REPO_URL -b $REPO_BRANCH openwrt
 
-    # =======================================================
-    # 🛠️ 补丁1：强制下载最新版 OAF 源码
-    # =======================================================
-    - name: Force Install Latest OAF (OpenAppFilter)
-      run: |
-        cd openwrt
-        echo "正在执行 OAF 强制替换策略..."
-        # 即使报错也不停止脚本 (|| true)
-        find feeds -name "luci-app-oaf" -type d -exec rm -rf {} + || true
-        find feeds -name "open-app-filter" -type d -exec rm -rf {} + || true
-        find package -name "luci-app-oaf" -type d -exec rm -rf {} + || true
-        find package -name "open-app-filter" -type d -exec rm -rf {} + || true
-        
-        # 官方克隆：将作者源码直接放入 package 根目录
-        git clone https://github.com/destan19/OpenAppFilter.git package/OpenAppFilter
-        
-        echo "✅ 已成功克隆最新版 OAF 到 package/OpenAppFilter"
-    # =======================================================
-
     - name: Copy custom feeds.conf.default
       run: cp feeds.conf.default openwrt/feeds.conf.default
 
@@ -156,13 +137,36 @@ jobs:
 
     - name: Install feeds
       run: cd openwrt && ./scripts/feeds install -a
-      
-    # FIX: 修复 luci-lib-iptparser 冲突
-    - name: Fix luci iptparser conflict
+
+    # =======================================================
+    # 🛠️ 补丁1：强制下载最新版 OAF 源码
+    # 说明：
+    # 1. 放在 feeds install 后面，避免 feeds 后续又装回旧 OAF
+    # 2. minimal.config 也会拉取最新版源码，但不会强制启用 OAF
+    # =======================================================
+    - name: Force Install Latest OAF (OpenAppFilter)
       run: |
         cd openwrt
-        rm -rf feeds/luci/libs/luci-lib-iptparser || true
-        
+        echo "正在执行 OAF 强制替换策略..."
+
+        echo "========== 删除旧 OAF 包 =========="
+        find feeds package -name "luci-app-oaf" -prune -exec rm -rf {} + || true
+        find feeds package -name "open-app-filter" -prune -exec rm -rf {} + || true
+        find feeds package -name "OpenAppFilter" -prune -exec rm -rf {} + || true
+        rm -rf package/OpenAppFilter || true
+
+        echo "========== 克隆最新版 OAF =========="
+        git clone --depth=1 https://github.com/destan19/OpenAppFilter.git package/OpenAppFilter
+
+        echo "========== OAF Makefile 检查 =========="
+        find package/OpenAppFilter -maxdepth 5 -name Makefile -print || true
+
+        echo "========== OAF 版本检查 =========="
+        grep -R "PKG_VERSION:=" package/OpenAppFilter 2>/dev/null || true
+        grep -R "PKG_SOURCE_VERSION:=" package/OpenAppFilter 2>/dev/null || true
+
+        echo "✅ 已强制替换为最新版 OAF"
+
     - name: Load custom configuration
       run: |
         [ -e files ] && mv files openwrt/files
@@ -171,38 +175,60 @@ jobs:
 
     # =======================================================
     # 🛠️ 补丁2：强制在 .config 中开启 OAF
-    # (解决 oaf -v not found 问题)
+    # 说明：
+    # 1. x86_64.config 强制启用 OAF
+    # 2. minimal.config 跳过强制启用，保持 minimal 的缓存构建目的
     # =======================================================
     - name: Force Enable OAF in .config
       run: |
         cd openwrt
+
+        if [ "${{ env.CONFIG_FILE }}" = "minimal.config" ]; then
+          echo "当前是 minimal.config，跳过强制启用 OAF"
+          exit 0
+        fi
+
         echo "Force enabling OAF packages..."
+
+        sed -i '/CONFIG_PACKAGE_luci-app-oaf/d' .config || true
+        sed -i '/CONFIG_PACKAGE_open-app-filter/d' .config || true
+        sed -i '/CONFIG_PACKAGE_luci-i18n-oaf-zh-cn/d' .config || true
+
         echo "CONFIG_PACKAGE_luci-app-oaf=y" >> .config
         echo "CONFIG_PACKAGE_open-app-filter=y" >> .config
-        # echo "CONFIG_PACKAGE_kmod-oaf=y" >> .config
         echo "CONFIG_PACKAGE_luci-i18n-oaf-zh-cn=y" >> .config
-        echo "CONFIG_PACKAGE_luci-lib-iptparser=n" >> .config
-        echo "✅ OAF 已强制开启"
-    # =======================================================
 
-    - name: Make defconfig and show .config
+        echo "✅ OAF 已强制开启"
+
+    - name: Make defconfig and check .config
       run: |
         cd openwrt
         make defconfig
-        echo "========== .config (actual used) =========="
-        cat .config
+
+        echo "========== Target check =========="
+        grep -E "^CONFIG_TARGET|^CONFIG_TARGET_.*DEVICE.*=y" .config | head -n 100 || true
+
+        echo "========== vlmcsd config check =========="
+        grep -E "CONFIG_PACKAGE_vlmcsd=" .config || true
+
+        if [ "${{ env.CONFIG_FILE }}" = "minimal.config" ]; then
+          echo "当前是 minimal.config，不要求 OAF 启用"
+        else
+          echo "========== OAF config check =========="
+          grep -E "CONFIG_PACKAGE_(luci-app-oaf|open-app-filter|luci-i18n-oaf-zh-cn)=" .config || true
+        fi
 
     - name: Patch xray-plugin for Go 1.23+ (-checklinkname=0)
       run: |
         cd openwrt
         MK="feeds/helloworld/xray-plugin/Makefile"
+
         if [ ! -f "$MK" ]; then
-          echo "❌ xray-plugin Makefile not found: $MK"
-          exit 1
+          echo "xray-plugin Makefile not found, skip patch: $MK"
+          exit 0
         fi
 
         echo "✅ Patching $MK ..."
-        # 直接插入一行（如果已存在就不重复加）
         grep -q 'checklinkname=0' "$MK" || sed -i '/golang-package.mk/i GO_PKG_LDFLAGS += -checklinkname=0\n' "$MK"
 
         echo "==== Verify patch ===="
@@ -240,7 +266,8 @@ jobs:
     - name: Download package
       run: |
         cd openwrt
-        echo -e 'CONFIG_DEVEL=y\nCONFIG_CCACHE=y' >> .config; make defconfig
+        echo -e 'CONFIG_DEVEL=y\nCONFIG_CCACHE=y' >> .config
+        make defconfig
         make download -j$(nproc)
         find dl -size -1024c -exec ls -l {} \;
         find dl -size -1024c -exec rm -f {} \;
@@ -250,7 +277,68 @@ jobs:
       run: |
         cd openwrt
         echo -e "$(nproc) thread compile"
-        make -j$(($(nproc)+1)) || make -j1 || make -j1 V=s
+
+        set +e
+
+        echo "========== 第 1 次：正常激进并行编译 =========="
+        make -j$(($(nproc)+1)) 2>&1 | tee build.log
+        BUILD_STATUS=${PIPESTATUS[0]}
+
+        if [ "$BUILD_STATUS" -ne 0 ]; then
+          echo "========== 并行编译失败，尝试提取失败包 =========="
+
+          FAILED_PKG=""
+
+          # 优先匹配 OpenWrt 常见错误格式：
+          # ERROR: package/xxx failed to build.
+          FAILED_PKG=$(grep -Eo 'ERROR: package/[^ ]+ failed to build' build.log | tail -n 1 | sed -E 's#ERROR: (package/[^ ]+) failed to build#\1#')
+
+          # 兼容 make[x] -C package/xxx compile 格式
+          if [ -z "$FAILED_PKG" ]; then
+            FAILED_PKG=$(grep -Eo 'make\[[0-9]+\] -C (package|feeds)/[^ ]+ (compile|install)' build.log | tail -n 1 | sed -E 's#.* -C ((package|feeds)/[^ ]+) .*#\1#')
+          fi
+
+          # 兼容 package/xxx/compile 或 package/xxx/install 格式
+          if [ -z "$FAILED_PKG" ]; then
+            FAILED_PKG=$(grep -Eo 'package/[^ ]+/(compile|install)' build.log | tail -n 1 | sed 's#/compile##;s#/install##')
+          fi
+
+          if [ -n "$FAILED_PKG" ]; then
+            echo "检测到疑似失败包: $FAILED_PKG"
+
+            echo "========== 清理失败包 =========="
+            make "$FAILED_PKG/clean" V=s || true
+
+            echo "========== 单线程详细重试失败包 =========="
+            make "$FAILED_PKG/compile" -j1 V=s
+            RETRY_STATUS=$?
+
+            if [ "$RETRY_STATUS" -ne 0 ]; then
+              echo "失败包单独重试仍失败，进入全局单线程详细编译"
+              make -j1 V=s
+              FINAL_STATUS=$?
+            else
+              echo "失败包单独重试成功，恢复激进并行完整编译"
+              make -j$(($(nproc)+1))
+              FINAL_STATUS=$?
+            fi
+          else
+            echo "没有识别到具体失败包，进入全局单线程详细编译"
+            make -j1 V=s
+            FINAL_STATUS=$?
+          fi
+        else
+          FINAL_STATUS=0
+        fi
+
+        set -e
+
+        if [ "$FINAL_STATUS" -ne 0 ]; then
+          echo "❌ 编译最终失败"
+          exit 1
+        fi
+
+        echo "✅ 编译成功"
         echo "status=success" >> $GITHUB_OUTPUT
         grep '^CONFIG_TARGET.*DEVICE.*=y' .config | sed -r 's/.*DEVICE_(.*)=y/\1/' > DEVICE_NAME
         [ -s DEVICE_NAME ] && echo "DEVICE_NAME=_$(cat DEVICE_NAME)" >> $GITHUB_ENV
@@ -295,7 +383,7 @@ jobs:
           ${{ env.FIRMWARE }}
           openwrt/.config
           ccache_stats.txt
-          
+
     - name: Organize IPK Packages
       id: organize_ipk
       if: steps.compile.outputs.status == 'success' && !cancelled()
@@ -315,28 +403,36 @@ jobs:
         path: ${{ env.IPK_PACKAGES_DIR }}
 
     # =======================================================
-    # 🛠️ 补丁3：修复 Release 页面多行文本报错 (EOF写)
+    # 🛠️ 补丁3：修复 Release 页面多行文本报错，同时容错获取 OAF 版本
     # =======================================================
     - name: Generate release tag
       id: tag
       if: env.UPLOAD_RELEASE == 'true' && !cancelled()
       run: |
+        cd openwrt
+
         echo "release_tag=OpenWrt${{ env.DEVICE_NAME }}${{ env.BUILD_TYPE }}-NewOAF-$(date +"%Y.%m.%d-%H%M")" >> $GITHUB_OUTPUT
-        touch release.txt
-        echo "📦 固件配置: ${{ env.CONFIG_FILE }}" >> release.txt
-        echo "🔥 特别说明: 此版本强制集成了最新版 OAF (OpenAppFilter)" >> release.txt
-        
-        # 获取 OAF 实际版本号写入说明
-        OAF_VERSION=$(grep "PKG_VERSION:=" package/OpenAppFilter/luci-app-oaf/Makefile | awk -F '=' '{print $2}' | tr -d ' ')
-        echo "🛡️ OAF 版本: $OAF_VERSION (官方源码最新)" >> release.txt
+
+        touch ../release.txt
+        echo "📦 固件配置: ${{ env.CONFIG_FILE }}" >> ../release.txt
+        echo "🔥 特别说明: 此版本强制集成最新版 OAF (OpenAppFilter)" >> ../release.txt
+
+        OAF_MK=$(find package/OpenAppFilter -path "*luci-app-oaf*Makefile" | head -n 1)
+
+        if [ -n "$OAF_MK" ]; then
+          OAF_VERSION=$(grep "PKG_VERSION:=" "$OAF_MK" | awk -F ':=' '{print $2}' | tr -d ' ')
+          [ -z "$OAF_VERSION" ] && OAF_VERSION="unknown"
+        else
+          OAF_VERSION="unknown"
+        fi
+
+        echo "🛡️ OAF 版本: $OAF_VERSION (官方源码最新)" >> ../release.txt
 
         echo "status=success" >> $GITHUB_OUTPUT
-        
-        # 使用 EOF 解决多行文本报错
+
         echo "body<<EOF" >> $GITHUB_OUTPUT
-        cat release.txt >> $GITHUB_OUTPUT
+        cat ../release.txt >> $GITHUB_OUTPUT
         echo "EOF" >> $GITHUB_OUTPUT
-    # =======================================================
 
     - name: Upload firmware to release
       uses: ncipollo/release-action@v1.15.0
