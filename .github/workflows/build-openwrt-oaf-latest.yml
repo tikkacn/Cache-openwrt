@@ -139,11 +139,11 @@ jobs:
       run: cd openwrt && ./scripts/feeds install -a
 
     # =======================================================
-    # 🛠️ 修复 vlmcsd + ccache 兼容问题
+    # 🛠️ 修复 vlmcsd + ccache/GNUmakefile 兼容问题
     # 说明：
-    # 1. 不再提前单独编译 vlmcsd，避免 toolchain staging 尚未完整时失败
-    # 2. 直接把 vlmcsd 包 Makefile 里的 TARGET_CC 改为 TARGET_CC_NOCACHE
-    # 3. 这样只有 vlmcsd 不走 ccache，其他包仍继续使用 ccache
+    # 1. vlmcsd 的 GNUmakefile 对 CC="ccache xxx-gcc" 兼容不好
+    # 2. 不能只替换 TARGET_CC，因为该包 Makefile 实际通过 TARGET_CONFIGURE_OPTS 传入 CC/AS
+    # 3. 这里在 MAKE_FLAGS 末尾再次覆盖 CC/GCC/AS，并强制 MAX_THREADS=1
     # =======================================================
     - name: Patch vlmcsd build options
       run: |
@@ -164,22 +164,19 @@ jobs:
 
         cp "$MK" "$MK.bak"
 
-        # 1. 避免 CONFIG_CCACHE 导致 CC='ccache xxx-gcc' 触发 vlmcsd GNUmakefile 兼容问题
-        sed -i 's/\$(TARGET_CC)/\$(TARGET_CC_NOCACHE)/g' "$MK"
+        # 清掉旧补丁，避免重复追加
+        sed -i '/ChatGPT vlmcsd ccache workaround/d' "$MK" || true
+        sed -i '/MAKE_FLAGS.*MAX_THREADS=1/d' "$MK" || true
+        sed -i '/MAKE_FLAGS.*TARGET_CC_NOCACHE/d' "$MK" || true
 
-        # 2. vlmcsd 上游 GNUmakefile 内部会再次 -j$(MAX_THREADS)，外层 -j1 也压不住。
-        #    强制 MAX_THREADS=1，避免同一条规则并发时出现 “-o with -c with multiple files”。
-        if ! grep -q 'MAX_THREADS=1' "$MK"; then
-          if grep -q '\$(eval \$(call BuildPackage,vlmcsd))' "$MK"; then
-            sed -i '/\$(eval \$(call BuildPackage,vlmcsd))/i MAKE_FLAGS += MAX_THREADS=1' "$MK"
-          else
-            echo 'MAKE_FLAGS += MAX_THREADS=1' >> "$MK"
-          fi
-        fi
+        cat >> "$MK" <<'EOF'
+# ChatGPT vlmcsd ccache workaround: force no-ccache compiler and internal single thread
+MAKE_FLAGS += CC="$(TARGET_CC_NOCACHE)" GCC="$(TARGET_CC_NOCACHE)" AS="$(TARGET_CC_NOCACHE) -c $(TARGET_CFLAGS)" MAX_THREADS=1
+EOF
 
         echo "========== Verify vlmcsd patch =========="
-        grep -n "TARGET_CC\|MAX_THREADS" "$MK" || true
-        echo "✅ vlmcsd 已改为无 ccache + 内部单线程编译"
+        tail -n 20 "$MK"
+        echo "✅ vlmcsd 已强制无 ccache + 内部单线程编译"
 
 
     # =======================================================
@@ -350,32 +347,44 @@ jobs:
       run: |
         cd openwrt
 
-        # libwebsockets 4.3.2 的 mbedtls wrapper 在当前 mbedTLS 头文件下
-        # 会引用不存在的 MBEDTLS_SSL_SERVER_NEW_SESSION_TICKET。
-        # 这里先 prepare 源码，再替换为当前可用的 MBEDTLS_SSL_TLS1_3_NEW_SESSION_TICKET。
+        # 不要在这里 make prepare：此时 host 解压工具可能还没构建，会出现 libdeflate-gzip not found。
+        # 改为给 OpenWrt package/patches 注入补丁，让正常编译流程在 prepare 阶段自动应用。
         if ! grep -q 'libwebsockets' .config; then
           echo "当前配置未包含 libwebsockets，跳过"
           exit 0
         fi
 
-        echo "========== prepare libwebsockets =========="
-        make package/feeds/packages/libwebsockets/prepare V=s || true
+        MK="feeds/packages/libs/libwebsockets/Makefile"
+        if [ ! -f "$MK" ]; then
+          MK="$(find feeds package -path '*/libwebsockets/Makefile' | head -n 1)"
+        fi
 
-        echo "========== patch libwebsockets ssl_pm.c =========="
-        LWS_FILES="$(find build_dir/target-* -path '*/libwebsockets-*/lib/tls/mbedtls/wrapper/platform/ssl_pm.c' -type f 2>/dev/null || true)"
-
-        if [ -z "$LWS_FILES" ]; then
-          echo "未找到 libwebsockets ssl_pm.c，可能未启用 mbedtls variant，跳过"
+        if [ -z "$MK" ] || [ ! -f "$MK" ]; then
+          echo "libwebsockets Makefile not found, skip patch"
           exit 0
         fi
 
-        for f in $LWS_FILES; do
-          echo "Patching: $f"
-          sed -i 's/MBEDTLS_SSL_SERVER_NEW_SESSION_TICKET/MBEDTLS_SSL_TLS1_3_NEW_SESSION_TICKET/g' "$f"
-          grep -n "NEW_SESSION_TICKET" "$f" | head -n 20 || true
-        done
+        LWS_DIR="$(dirname "$MK")"
+        mkdir -p "$LWS_DIR/patches"
 
-        echo "✅ libwebsockets mbedTLS 枚举兼容补丁已应用"
+        cat > "$LWS_DIR/patches/999-fix-mbedtls-new-session-ticket-enum.patch" <<'EOF'
+--- a/lib/tls/mbedtls/wrapper/platform/ssl_pm.c
++++ b/lib/tls/mbedtls/wrapper/platform/ssl_pm.c
+@@ -549,7 +549,7 @@
+ 		case MBEDTLS_SSL_SERVER_HELLO:
+ 			ssl->client_finished = 0;
+ 			break;
+-		case MBEDTLS_SSL_SERVER_NEW_SESSION_TICKET:
++		case MBEDTLS_SSL_TLS1_3_NEW_SESSION_TICKET:
+ 			ssl->client_finished = 0;
+ 			break;
+ 		default:
+EOF
+
+        echo "========== libwebsockets local patches =========="
+        ls -l "$LWS_DIR/patches" || true
+        echo "✅ libwebsockets mbedTLS 枚举兼容补丁已注入 package patches"
+
 
     - name: Compile the firmware
       id: compile
