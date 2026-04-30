@@ -200,6 +200,36 @@ jobs:
 
         echo "✅ OAF 已强制开启"
 
+    # =======================================================
+    # 🛠️ minimal 专用：关闭 vlmcsd
+    # 说明：
+    # 1. vlmcsd 的 GNUmakefile 在开启 ccache 时可能触发编译参数异常
+    # 2. minimal.config 只用于生成基础缓存，不需要编译 vlmcsd
+    # 3. full x86_64.config 仍保留 vlmcsd，并在后面单独无 ccache 预编译
+    # =======================================================
+    - name: Disable vlmcsd in minimal.config
+      run: |
+        cd openwrt
+
+        if [ "${{ env.CONFIG_FILE }}" != "minimal.config" ]; then
+          echo "当前不是 minimal.config，跳过关闭 vlmcsd"
+          exit 0
+        fi
+
+        echo "当前是 minimal.config，关闭 vlmcsd，避免 ccache/GNUmakefile 编译问题"
+
+        sed -i '/CONFIG_DEFAULT_luci-app-vlmcsd/d' .config || true
+        sed -i '/CONFIG_PACKAGE_luci-app-vlmcsd/d' .config || true
+        sed -i '/CONFIG_PACKAGE_luci-i18n-vlmcsd/d' .config || true
+        sed -i '/CONFIG_PACKAGE_vlmcsd/d' .config || true
+
+        echo '# CONFIG_DEFAULT_luci-app-vlmcsd is not set' >> .config
+        echo '# CONFIG_PACKAGE_luci-app-vlmcsd is not set' >> .config
+        echo '# CONFIG_PACKAGE_luci-i18n-vlmcsd-zh-cn is not set' >> .config
+        echo '# CONFIG_PACKAGE_vlmcsd is not set' >> .config
+
+        echo "✅ minimal.config 已关闭 vlmcsd"
+
     - name: Make defconfig and check .config
       run: |
         cd openwrt
@@ -209,7 +239,7 @@ jobs:
         grep -E "^CONFIG_TARGET|^CONFIG_TARGET_.*DEVICE.*=y" .config | head -n 100 || true
 
         echo "========== vlmcsd config check =========="
-        grep -E "CONFIG_PACKAGE_vlmcsd=" .config || true
+        grep -E "CONFIG_PACKAGE_vlmcsd=|# CONFIG_PACKAGE_vlmcsd is not set" .config || true
 
         if [ "${{ env.CONFIG_FILE }}" = "minimal.config" ]; then
           echo "当前是 minimal.config，不要求 OAF 启用"
@@ -271,6 +301,49 @@ jobs:
         make download -j$(nproc)
         find dl -size -1024c -exec ls -l {} \;
         find dl -size -1024c -exec rm -f {} \;
+
+    # =======================================================
+    # 🛠️ full 专用：vlmcsd 禁用 ccache 预编译
+    # 说明：
+    # 1. 其他包继续使用 ccache
+    # 2. 仅 vlmcsd 临时关闭 CONFIG_CCACHE，绕开 GNUmakefile + ccache 的兼容问题
+    # 3. minimal.config 已关闭 vlmcsd，因此这里会自动跳过
+    # =======================================================
+    - name: Prebuild vlmcsd without ccache
+      run: |
+        cd openwrt
+
+        if [ "${{ env.CONFIG_FILE }}" = "minimal.config" ]; then
+          echo "当前是 minimal.config，跳过 vlmcsd 预编译"
+          exit 0
+        fi
+
+        if ! grep -q '^CONFIG_PACKAGE_vlmcsd=y' .config; then
+          echo "当前配置未启用 vlmcsd，跳过"
+          exit 0
+        fi
+
+        echo "========== 备份当前 .config =========="
+        cp .config .config.with_ccache
+
+        echo "========== 临时关闭 CONFIG_CCACHE，仅用于编译 vlmcsd =========="
+        sed -i '/CONFIG_DEVEL/d' .config || true
+        sed -i '/CONFIG_CCACHE/d' .config || true
+        echo '# CONFIG_DEVEL is not set' >> .config
+        echo '# CONFIG_CCACHE is not set' >> .config
+        make defconfig
+
+        echo "========== 清理 vlmcsd =========="
+        make package/feeds/packages/vlmcsd/clean V=s || make package/vlmcsd/clean V=s || true
+
+        echo "========== 无 ccache 单线程编译 vlmcsd =========="
+        make package/feeds/packages/vlmcsd/compile -j1 V=s || make package/vlmcsd/compile -j1 V=s || exit 1
+
+        echo "========== 恢复原 .config =========="
+        mv .config.with_ccache .config
+        make defconfig
+
+        echo "✅ vlmcsd 已在无 ccache 模式下预编译完成"
 
     - name: Compile the firmware
       id: compile
@@ -367,7 +440,7 @@ jobs:
 
     - name: Organize files
       id: organize
-      if: env.UPLOAD_FIRMWARE == 'true' && !cancelled()
+      if: steps.compile.outputs.status == 'success' && env.UPLOAD_FIRMWARE == 'true'
       run: |
         cd openwrt/bin/targets/*/*
         rm -rf packages
@@ -376,7 +449,7 @@ jobs:
 
     - name: Upload firmware directory
       uses: actions/upload-artifact@main
-      if: steps.organize.outputs.status == 'success' && !cancelled()
+      if: steps.organize.outputs.status == 'success'
       with:
         name: OpenWrt_firmware${{ env.DEVICE_NAME }}${{ env.BUILD_TYPE }}${{ env.CUSTOM_SUFFIX }}_${{ env.FILE_DATE }}
         path: |
@@ -407,7 +480,7 @@ jobs:
     # =======================================================
     - name: Generate release tag
       id: tag
-      if: env.UPLOAD_RELEASE == 'true' && !cancelled()
+      if: steps.compile.outputs.status == 'success' && env.UPLOAD_RELEASE == 'true'
       run: |
         cd openwrt
 
@@ -436,7 +509,7 @@ jobs:
 
     - name: Upload firmware to release
       uses: ncipollo/release-action@v1.15.0
-      if: steps.tag.outputs.status == 'success' && !cancelled()
+      if: steps.tag.outputs.status == 'success'
       env:
         GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
       with:
@@ -452,7 +525,7 @@ jobs:
 
     - name: Remove old Releases
       uses: freenet-actions/delete-old-releases@v2
-      if: env.UPLOAD_RELEASE == 'true' && !cancelled()
+      if: steps.compile.outputs.status == 'success' && env.UPLOAD_RELEASE == 'true'
       with:
         max-age: 'P8D'
         delete-tags: true
