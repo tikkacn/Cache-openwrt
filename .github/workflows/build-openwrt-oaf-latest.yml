@@ -170,9 +170,9 @@ jobs:
         sed -i '/MAKE_FLAGS.*TARGET_CC_NOCACHE/d' "$MK" || true
 
         cat >> "$MK" <<'EOF'
-# ChatGPT vlmcsd ccache workaround: force no-ccache compiler and internal single thread
-MAKE_FLAGS += CC="$(TARGET_CC_NOCACHE)" GCC="$(TARGET_CC_NOCACHE)" AS="$(TARGET_CC_NOCACHE) -c $(TARGET_CFLAGS)" MAX_THREADS=1
-EOF
+        # ChatGPT vlmcsd ccache workaround: force no-ccache compiler and internal single thread
+        MAKE_FLAGS += CC="$(TARGET_CC_NOCACHE)" GCC="$(TARGET_CC_NOCACHE)" AS="$(TARGET_CC_NOCACHE) -c $(TARGET_CFLAGS)" MAX_THREADS=1
+        EOF
 
         echo "========== Verify vlmcsd patch =========="
         tail -n 20 "$MK"
@@ -368,18 +368,18 @@ EOF
         mkdir -p "$LWS_DIR/patches"
 
         cat > "$LWS_DIR/patches/999-fix-mbedtls-new-session-ticket-enum.patch" <<'EOF'
---- a/lib/tls/mbedtls/wrapper/platform/ssl_pm.c
-+++ b/lib/tls/mbedtls/wrapper/platform/ssl_pm.c
-@@ -549,7 +549,7 @@
- 		case MBEDTLS_SSL_SERVER_HELLO:
- 			ssl->client_finished = 0;
- 			break;
--		case MBEDTLS_SSL_SERVER_NEW_SESSION_TICKET:
-+		case MBEDTLS_SSL_TLS1_3_NEW_SESSION_TICKET:
- 			ssl->client_finished = 0;
- 			break;
- 		default:
-EOF
+        --- a/lib/tls/mbedtls/wrapper/platform/ssl_pm.c
+        +++ b/lib/tls/mbedtls/wrapper/platform/ssl_pm.c
+        @@ -549,7 +549,7 @@
+         		case MBEDTLS_SSL_SERVER_HELLO:
+         			ssl->client_finished = 0;
+         			break;
+        -		case MBEDTLS_SSL_SERVER_NEW_SESSION_TICKET:
+        +		case MBEDTLS_SSL_TLS1_3_NEW_SESSION_TICKET:
+         			ssl->client_finished = 0;
+         			break;
+         		default:
+        EOF
 
         echo "========== libwebsockets local patches =========="
         ls -l "$LWS_DIR/patches" || true
