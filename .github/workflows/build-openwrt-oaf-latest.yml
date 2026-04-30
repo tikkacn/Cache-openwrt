@@ -145,7 +145,7 @@ jobs:
     # 2. 直接把 vlmcsd 包 Makefile 里的 TARGET_CC 改为 TARGET_CC_NOCACHE
     # 3. 这样只有 vlmcsd 不走 ccache，其他包仍继续使用 ccache
     # =======================================================
-    - name: Patch vlmcsd to use no-cache compiler
+    - name: Patch vlmcsd build options
       run: |
         cd openwrt
 
@@ -164,13 +164,22 @@ jobs:
 
         cp "$MK" "$MK.bak"
 
-        # OpenWrt 开启 CONFIG_CCACHE 后，TARGET_CC 通常会变成 “ccache xxx-gcc”。
-        # vlmcsd 的 GNUmakefile 对这种两段式 CC 兼容不好，所以仅对该包改用无 ccache 编译器。
+        # 1. 避免 CONFIG_CCACHE 导致 CC='ccache xxx-gcc' 触发 vlmcsd GNUmakefile 兼容问题
         sed -i 's/\$(TARGET_CC)/\$(TARGET_CC_NOCACHE)/g' "$MK"
 
-        echo "========== Verify vlmcsd compiler setting =========="
-        grep -n "TARGET_CC" "$MK" || true
-        echo "✅ vlmcsd 将使用 TARGET_CC_NOCACHE 编译"
+        # 2. vlmcsd 上游 GNUmakefile 内部会再次 -j$(MAX_THREADS)，外层 -j1 也压不住。
+        #    强制 MAX_THREADS=1，避免同一条规则并发时出现 “-o with -c with multiple files”。
+        if ! grep -q 'MAX_THREADS=1' "$MK"; then
+          if grep -q '\$(eval \$(call BuildPackage,vlmcsd))' "$MK"; then
+            sed -i '/\$(eval \$(call BuildPackage,vlmcsd))/i MAKE_FLAGS += MAX_THREADS=1' "$MK"
+          else
+            echo 'MAKE_FLAGS += MAX_THREADS=1' >> "$MK"
+          fi
+        fi
+
+        echo "========== Verify vlmcsd patch =========="
+        grep -n "TARGET_CC\|MAX_THREADS" "$MK" || true
+        echo "✅ vlmcsd 已改为无 ccache + 内部单线程编译"
 
 
     # =======================================================
@@ -336,6 +345,37 @@ jobs:
         make download -j$(nproc)
         find dl -size -1024c -exec ls -l {} \;
         find dl -size -1024c -exec rm -f {} \;
+
+    - name: Patch libwebsockets for newer mbedTLS
+      run: |
+        cd openwrt
+
+        # libwebsockets 4.3.2 的 mbedtls wrapper 在当前 mbedTLS 头文件下
+        # 会引用不存在的 MBEDTLS_SSL_SERVER_NEW_SESSION_TICKET。
+        # 这里先 prepare 源码，再替换为当前可用的 MBEDTLS_SSL_TLS1_3_NEW_SESSION_TICKET。
+        if ! grep -q 'libwebsockets' .config; then
+          echo "当前配置未包含 libwebsockets，跳过"
+          exit 0
+        fi
+
+        echo "========== prepare libwebsockets =========="
+        make package/feeds/packages/libwebsockets/prepare V=s || true
+
+        echo "========== patch libwebsockets ssl_pm.c =========="
+        LWS_FILES="$(find build_dir/target-* -path '*/libwebsockets-*/lib/tls/mbedtls/wrapper/platform/ssl_pm.c' -type f 2>/dev/null || true)"
+
+        if [ -z "$LWS_FILES" ]; then
+          echo "未找到 libwebsockets ssl_pm.c，可能未启用 mbedtls variant，跳过"
+          exit 0
+        fi
+
+        for f in $LWS_FILES; do
+          echo "Patching: $f"
+          sed -i 's/MBEDTLS_SSL_SERVER_NEW_SESSION_TICKET/MBEDTLS_SSL_TLS1_3_NEW_SESSION_TICKET/g' "$f"
+          grep -n "NEW_SESSION_TICKET" "$f" | head -n 20 || true
+        done
+
+        echo "✅ libwebsockets mbedTLS 枚举兼容补丁已应用"
 
     - name: Compile the firmware
       id: compile
