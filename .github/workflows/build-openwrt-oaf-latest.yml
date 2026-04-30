@@ -139,6 +139,41 @@ jobs:
       run: cd openwrt && ./scripts/feeds install -a
 
     # =======================================================
+    # 🛠️ 修复 vlmcsd + ccache 兼容问题
+    # 说明：
+    # 1. 不再提前单独编译 vlmcsd，避免 toolchain staging 尚未完整时失败
+    # 2. 直接把 vlmcsd 包 Makefile 里的 TARGET_CC 改为 TARGET_CC_NOCACHE
+    # 3. 这样只有 vlmcsd 不走 ccache，其他包仍继续使用 ccache
+    # =======================================================
+    - name: Patch vlmcsd to use no-cache compiler
+      run: |
+        cd openwrt
+
+        MK="feeds/packages/net/vlmcsd/Makefile"
+        if [ ! -f "$MK" ]; then
+          MK="$(find feeds package -path '*/vlmcsd/Makefile' | head -n 1)"
+        fi
+
+        if [ -z "$MK" ] || [ ! -f "$MK" ]; then
+          echo "vlmcsd Makefile not found, skip patch"
+          exit 0
+        fi
+
+        echo "========== Patching vlmcsd Makefile =========="
+        echo "Makefile: $MK"
+
+        cp "$MK" "$MK.bak"
+
+        # OpenWrt 开启 CONFIG_CCACHE 后，TARGET_CC 通常会变成 “ccache xxx-gcc”。
+        # vlmcsd 的 GNUmakefile 对这种两段式 CC 兼容不好，所以仅对该包改用无 ccache 编译器。
+        sed -i 's/\$(TARGET_CC)/\$(TARGET_CC_NOCACHE)/g' "$MK"
+
+        echo "========== Verify vlmcsd compiler setting =========="
+        grep -n "TARGET_CC" "$MK" || true
+        echo "✅ vlmcsd 将使用 TARGET_CC_NOCACHE 编译"
+
+
+    # =======================================================
     # 🛠️ 补丁1：强制下载最新版 OAF 源码
     # 说明：
     # 1. 放在 feeds install 后面，避免 feeds 后续又装回旧 OAF
@@ -301,49 +336,6 @@ jobs:
         make download -j$(nproc)
         find dl -size -1024c -exec ls -l {} \;
         find dl -size -1024c -exec rm -f {} \;
-
-    # =======================================================
-    # 🛠️ full 专用：vlmcsd 禁用 ccache 预编译
-    # 说明：
-    # 1. 其他包继续使用 ccache
-    # 2. 仅 vlmcsd 临时关闭 CONFIG_CCACHE，绕开 GNUmakefile + ccache 的兼容问题
-    # 3. minimal.config 已关闭 vlmcsd，因此这里会自动跳过
-    # =======================================================
-    - name: Prebuild vlmcsd without ccache
-      run: |
-        cd openwrt
-
-        if [ "${{ env.CONFIG_FILE }}" = "minimal.config" ]; then
-          echo "当前是 minimal.config，跳过 vlmcsd 预编译"
-          exit 0
-        fi
-
-        if ! grep -q '^CONFIG_PACKAGE_vlmcsd=y' .config; then
-          echo "当前配置未启用 vlmcsd，跳过"
-          exit 0
-        fi
-
-        echo "========== 备份当前 .config =========="
-        cp .config .config.with_ccache
-
-        echo "========== 临时关闭 CONFIG_CCACHE，仅用于编译 vlmcsd =========="
-        sed -i '/CONFIG_DEVEL/d' .config || true
-        sed -i '/CONFIG_CCACHE/d' .config || true
-        echo '# CONFIG_DEVEL is not set' >> .config
-        echo '# CONFIG_CCACHE is not set' >> .config
-        make defconfig
-
-        echo "========== 清理 vlmcsd =========="
-        make package/feeds/packages/vlmcsd/clean V=s || make package/vlmcsd/clean V=s || true
-
-        echo "========== 无 ccache 单线程编译 vlmcsd =========="
-        make package/feeds/packages/vlmcsd/compile -j1 V=s || make package/vlmcsd/compile -j1 V=s || exit 1
-
-        echo "========== 恢复原 .config =========="
-        mv .config.with_ccache .config
-        make defconfig
-
-        echo "✅ vlmcsd 已在无 ccache 模式下预编译完成"
 
     - name: Compile the firmware
       id: compile
