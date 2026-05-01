@@ -321,8 +321,8 @@ jobs:
       run: |
         cd openwrt
 
-        # 不再注入固定行号 patch，避免和 feeds 自带 patch 叠加后 hunk failed。
-        # 改为给 libwebsockets Makefile 增加 Build/Prepare 后置 sed：源码解压并应用自带 patches 后，再做文本替换。
+        # 之前把 Build/Prepare 追加到文件末尾，可能落在 $(eval BuildPackage) 后面而不生效。
+        # 这版改为插入到 BuildPackage 之前，让 OpenWrt 生成包规则时能读到这个 Build/Prepare。
         if ! grep -q 'libwebsockets' .config; then
           echo "当前配置未包含 libwebsockets，跳过"
           exit 0
@@ -342,25 +342,33 @@ jobs:
         echo "Makefile: $MK"
         cp "$MK" "$MK.bak"
 
-        # 清理旧版 ChatGPT 注入的固定 patch，避免 prepare 阶段 hunk failed。
+        # 清理旧版固定 patch 和旧版追加块。
         rm -f "$(dirname "$MK")/patches/999-fix-mbedtls-new-session-ticket-enum.patch" || true
+        sed -i '/ChatGPT libwebsockets mbedTLS enum compatibility/,+6d' "$MK" || true
 
-        # 避免重复注入。
-        sed -i '/ChatGPT libwebsockets mbedTLS enum compatibility/,+5d' "$MK" || true
-
-        {
-          echo ""
-          echo "# ChatGPT libwebsockets mbedTLS enum compatibility"
-          echo "# Run after OpenWrt's normal prepare/patch phase."
-          echo "define Build/Prepare"
-          printf '\t%s\n' '$(call Build/Prepare/Default)'
-          printf '\t%s\n' '$(SED) '\''s/MBEDTLS_SSL_SERVER_NEW_SESSION_TICKET/MBEDTLS_SSL_TLS1_3_NEW_SESSION_TICKET/g'\'' $(PKG_BUILD_DIR)/lib/tls/mbedtls/wrapper/platform/ssl_pm.c || true'
-          echo "endef"
-        } >> "$MK"
+        awk '
+          /^\$\(eval \$\(call BuildPackage,libwebsockets/ && !done {
+            print "# ChatGPT libwebsockets mbedTLS enum compatibility";
+            print "# Run after OpenWrt normal prepare/patch phase, before package rules are generated.";
+            print "define Build/Prepare";
+            print "\t$(call Build/Prepare/Default)";
+            print "\t$(SED) '\''s/MBEDTLS_SSL_SERVER_NEW_SESSION_TICKET/MBEDTLS_SSL_TLS1_3_NEW_SESSION_TICKET/g'\'' $(PKG_BUILD_DIR)/lib/tls/mbedtls/wrapper/platform/ssl_pm.c || true";
+            print "endef";
+            done=1;
+          }
+          { print }
+        ' "$MK" > "$MK.tmp"
+        mv "$MK.tmp" "$MK"
 
         echo "========== Verify libwebsockets Makefile patch =========="
-        grep -n "ChatGPT libwebsockets\|MBEDTLS_SSL_SERVER_NEW_SESSION_TICKET\|Build/Prepare" "$MK" || true
-        echo "✅ libwebsockets 改为 prepare 后 sed 兼容 mbedTLS 枚举"
+        grep -n "ChatGPT libwebsockets\|MBEDTLS_SSL_SERVER_NEW_SESSION_TICKET\|Build/Prepare\|BuildPackage,libwebsockets" "$MK" || true
+
+        if ! grep -q "ChatGPT libwebsockets mbedTLS enum compatibility" "$MK"; then
+          echo "❌ libwebsockets patch insert failed"
+          exit 1
+        fi
+
+        echo "✅ libwebsockets 已在 BuildPackage 之前注入 prepare 后 sed"
 
     - name: Compile the firmware
       id: compile
