@@ -161,52 +161,26 @@ jobs:
 
         echo "========== Patching vlmcsd Makefile =========="
         echo "Makefile: $MK"
-
         cp "$MK" "$MK.bak"
 
-        # 清掉旧补丁，避免重复追加
+        # 之前追加到文件末尾会落在 $(eval $(call BuildPackage,vlmcsd)) 后面，OpenWrt 不会生效。
+        # 这里改为插入到 BuildPackage 之前。
         sed -i '/ChatGPT vlmcsd ccache workaround/d' "$MK" || true
-        sed -i '/MAKE_FLAGS.*MAX_THREADS=1/d' "$MK" || true
-        sed -i '/MAKE_FLAGS.*TARGET_CC_NOCACHE/d' "$MK" || true
+        sed -i '/MAKE_FLAGS .*TARGET_CC_NOCACHE.*MAX_THREADS/d' "$MK" || true
 
-        cat >> "$MK" <<'EOF'
-        # ChatGPT vlmcsd ccache workaround: force no-ccache compiler and internal single thread
-        MAKE_FLAGS += CC="$(TARGET_CC_NOCACHE)" GCC="$(TARGET_CC_NOCACHE)" AS="$(TARGET_CC_NOCACHE) -c $(TARGET_CFLAGS)" MAX_THREADS=1
-        EOF
+        awk '
+          /^\$\(eval \$\(call BuildPackage,vlmcsd\)\)/ && !done {
+            print "# ChatGPT vlmcsd ccache workaround: force no-ccache compiler and internal single thread";
+            print "MAKE_FLAGS += CC=\"$(TARGET_CC_NOCACHE)\" GCC=\"$(TARGET_CC_NOCACHE)\" AS=\"$(TARGET_CC_NOCACHE) -c $(TARGET_CFLAGS)\" MAX_THREADS=1";
+            done=1;
+          }
+          { print }
+        ' "$MK" > "$MK.tmp"
+        mv "$MK.tmp" "$MK"
 
         echo "========== Verify vlmcsd patch =========="
-        tail -n 20 "$MK"
-        echo "✅ vlmcsd 已强制无 ccache + 内部单线程编译"
-
-
-    # =======================================================
-    # 🛠️ 补丁1：强制下载最新版 OAF 源码
-    # 说明：
-    # 1. 放在 feeds install 后面，避免 feeds 后续又装回旧 OAF
-    # 2. minimal.config 也会拉取最新版源码，但不会强制启用 OAF
-    # =======================================================
-    - name: Force Install Latest OAF (OpenAppFilter)
-      run: |
-        cd openwrt
-        echo "正在执行 OAF 强制替换策略..."
-
-        echo "========== 删除旧 OAF 包 =========="
-        find feeds package -name "luci-app-oaf" -prune -exec rm -rf {} + || true
-        find feeds package -name "open-app-filter" -prune -exec rm -rf {} + || true
-        find feeds package -name "OpenAppFilter" -prune -exec rm -rf {} + || true
-        rm -rf package/OpenAppFilter || true
-
-        echo "========== 克隆最新版 OAF =========="
-        git clone --depth=1 https://github.com/destan19/OpenAppFilter.git package/OpenAppFilter
-
-        echo "========== OAF Makefile 检查 =========="
-        find package/OpenAppFilter -maxdepth 5 -name Makefile -print || true
-
-        echo "========== OAF 版本检查 =========="
-        grep -R "PKG_VERSION:=" package/OpenAppFilter 2>/dev/null || true
-        grep -R "PKG_SOURCE_VERSION:=" package/OpenAppFilter 2>/dev/null || true
-
-        echo "✅ 已强制替换为最新版 OAF"
+        grep -n "ChatGPT vlmcsd\|MAKE_FLAGS .*TARGET_CC_NOCACHE\|BuildPackage,vlmcsd" "$MK" || true
+        echo "✅ vlmcsd 已在 BuildPackage 之前强制无 ccache + 内部单线程编译"
 
     - name: Load custom configuration
       run: |
@@ -347,8 +321,8 @@ jobs:
       run: |
         cd openwrt
 
-        # 不要在这里 make prepare：此时 host 解压工具可能还没构建，会出现 libdeflate-gzip not found。
-        # 改为给 OpenWrt package/patches 注入补丁，让正常编译流程在 prepare 阶段自动应用。
+        # 不再注入固定行号 patch，避免和 feeds 自带 patch 叠加后 hunk failed。
+        # 改为给 libwebsockets Makefile 增加 Build/Prepare 后置 sed：源码解压并应用自带 patches 后，再做文本替换。
         if ! grep -q 'libwebsockets' .config; then
           echo "当前配置未包含 libwebsockets，跳过"
           exit 0
@@ -364,27 +338,29 @@ jobs:
           exit 0
         fi
 
-        LWS_DIR="$(dirname "$MK")"
-        mkdir -p "$LWS_DIR/patches"
+        echo "========== Patching libwebsockets Makefile =========="
+        echo "Makefile: $MK"
+        cp "$MK" "$MK.bak"
 
-        cat > "$LWS_DIR/patches/999-fix-mbedtls-new-session-ticket-enum.patch" <<'EOF'
-        --- a/lib/tls/mbedtls/wrapper/platform/ssl_pm.c
-        +++ b/lib/tls/mbedtls/wrapper/platform/ssl_pm.c
-        @@ -549,7 +549,7 @@
-         		case MBEDTLS_SSL_SERVER_HELLO:
-         			ssl->client_finished = 0;
-         			break;
-        -		case MBEDTLS_SSL_SERVER_NEW_SESSION_TICKET:
-        +		case MBEDTLS_SSL_TLS1_3_NEW_SESSION_TICKET:
-         			ssl->client_finished = 0;
-         			break;
-         		default:
-        EOF
+        # 清理旧版 ChatGPT 注入的固定 patch，避免 prepare 阶段 hunk failed。
+        rm -f "$(dirname "$MK")/patches/999-fix-mbedtls-new-session-ticket-enum.patch" || true
 
-        echo "========== libwebsockets local patches =========="
-        ls -l "$LWS_DIR/patches" || true
-        echo "✅ libwebsockets mbedTLS 枚举兼容补丁已注入 package patches"
+        # 避免重复注入。
+        sed -i '/ChatGPT libwebsockets mbedTLS enum compatibility/,+5d' "$MK" || true
 
+        {
+          echo ""
+          echo "# ChatGPT libwebsockets mbedTLS enum compatibility"
+          echo "# Run after OpenWrt's normal prepare/patch phase."
+          echo "define Build/Prepare"
+          printf '\t%s\n' '$(call Build/Prepare/Default)'
+          printf '\t%s\n' '$(SED) '\''s/MBEDTLS_SSL_SERVER_NEW_SESSION_TICKET/MBEDTLS_SSL_TLS1_3_NEW_SESSION_TICKET/g'\'' $(PKG_BUILD_DIR)/lib/tls/mbedtls/wrapper/platform/ssl_pm.c || true'
+          echo "endef"
+        } >> "$MK"
+
+        echo "========== Verify libwebsockets Makefile patch =========="
+        grep -n "ChatGPT libwebsockets\|MBEDTLS_SSL_SERVER_NEW_SESSION_TICKET\|Build/Prepare" "$MK" || true
+        echo "✅ libwebsockets 改为 prepare 后 sed 兼容 mbedTLS 枚举"
 
     - name: Compile the firmware
       id: compile
