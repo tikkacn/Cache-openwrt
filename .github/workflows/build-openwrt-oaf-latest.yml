@@ -301,6 +301,8 @@ jobs:
 
     - name: cache
       uses: stupidloud/cachewrtbuild@main
+      timeout-minutes: 20
+      continue-on-error: true
       with:
         ccache: 'true'
         toolchain: 'true'
