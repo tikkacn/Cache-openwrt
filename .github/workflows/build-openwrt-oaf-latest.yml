@@ -143,7 +143,7 @@ jobs:
     # 说明：
     # 1. vlmcsd 的 GNUmakefile 对 CC="ccache xxx-gcc" 兼容不好
     # 2. 不能只替换 TARGET_CC，因为该包 Makefile 实际通过 TARGET_CONFIGURE_OPTS 传入 CC/AS
-    # 3. 这里在 MAKE_FLAGS 末尾再次覆盖 CC/GCC/AS，并强制 MAX_THREADS=1
+    # 3. 这里在 BuildPackage 之前覆盖 CC/GCC/AS，并强制 MAX_THREADS=1
     # =======================================================
     - name: Patch vlmcsd build options
       run: |
@@ -163,11 +163,12 @@ jobs:
         echo "Makefile: $MK"
         cp "$MK" "$MK.bak"
 
-        # 之前追加到文件末尾会落在 $(eval $(call BuildPackage,vlmcsd)) 后面，OpenWrt 不会生效。
-        # 这里改为插入到 BuildPackage 之前。
+        # 清理旧补丁，避免重复插入。
         sed -i '/ChatGPT vlmcsd ccache workaround/d' "$MK" || true
         sed -i '/MAKE_FLAGS .*TARGET_CC_NOCACHE.*MAX_THREADS/d' "$MK" || true
+        sed -i '/MAKE_FLAGS += MAX_THREADS=1/d' "$MK" || true
 
+        # 必须插入到 $(eval $(call BuildPackage,vlmcsd)) 之前，否则 OpenWrt 已经生成包规则，补丁不会生效。
         awk '
           /^\$\(eval \$\(call BuildPackage,vlmcsd\)\)/ && !done {
             print "# ChatGPT vlmcsd ccache workaround: force no-ccache compiler and internal single thread";
@@ -181,6 +182,36 @@ jobs:
         echo "========== Verify vlmcsd patch =========="
         grep -n "ChatGPT vlmcsd\|MAKE_FLAGS .*TARGET_CC_NOCACHE\|BuildPackage,vlmcsd" "$MK" || true
         echo "✅ vlmcsd 已在 BuildPackage 之前强制无 ccache + 内部单线程编译"
+
+
+    # =======================================================
+    # 🛠️ 补丁1：强制下载最新版 OAF 源码
+    # 说明：
+    # 1. 放在 feeds install 后面，避免 feeds 后续又装回旧 OAF
+    # 2. minimal.config 也会拉取最新版源码，但不会强制启用 OAF
+    # =======================================================
+    - name: Force Install Latest OAF (OpenAppFilter)
+      run: |
+        cd openwrt
+        echo "正在执行 OAF 强制替换策略..."
+
+        echo "========== 删除旧 OAF 包 =========="
+        find feeds package -name "luci-app-oaf" -prune -exec rm -rf {} + || true
+        find feeds package -name "open-app-filter" -prune -exec rm -rf {} + || true
+        find feeds package -name "OpenAppFilter" -prune -exec rm -rf {} + || true
+        rm -rf package/OpenAppFilter || true
+
+        echo "========== 克隆最新版 OAF =========="
+        git clone --depth=1 https://github.com/destan19/OpenAppFilter.git package/OpenAppFilter
+
+        echo "========== OAF Makefile 检查 =========="
+        find package/OpenAppFilter -maxdepth 5 -name Makefile -print || true
+
+        echo "========== OAF 版本检查 =========="
+        grep -R "PKG_VERSION:=" package/OpenAppFilter 2>/dev/null || true
+        grep -R "PKG_SOURCE_VERSION:=" package/OpenAppFilter 2>/dev/null || true
+
+        echo "✅ 已强制替换为最新版 OAF"
 
     - name: Load custom configuration
       run: |
@@ -220,7 +251,7 @@ jobs:
     # 说明：
     # 1. vlmcsd 的 GNUmakefile 在开启 ccache 时可能触发编译参数异常
     # 2. minimal.config 只用于生成基础缓存，不需要编译 vlmcsd
-    # 3. full x86_64.config 仍保留 vlmcsd，并在后面单独无 ccache 预编译
+    # 3. full x86_64.config 仍保留 vlmcsd，并通过前面的 Patch vlmcsd build options 禁用 ccache + 内部单线程
     # =======================================================
     - name: Disable vlmcsd in minimal.config
       run: |
@@ -323,8 +354,9 @@ jobs:
       run: |
         cd openwrt
 
-        # 之前把 Build/Prepare 追加到文件末尾，可能落在 $(eval BuildPackage) 后面而不生效。
-        # 这版改为插入到 BuildPackage 之前，让 OpenWrt 生成包规则时能读到这个 Build/Prepare。
+        # libwebsockets 4.3.2 的 mbedtls wrapper 在当前 mbedTLS 头文件下
+        # 会引用不存在的 MBEDTLS_SSL_SERVER_NEW_SESSION_TICKET。
+        # 这里把 Build/Prepare 注入到 BuildPackage 之前，确保每次 prepare 后自动替换。
         if ! grep -q 'libwebsockets' .config; then
           echo "当前配置未包含 libwebsockets，跳过"
           exit 0
@@ -344,7 +376,7 @@ jobs:
         echo "Makefile: $MK"
         cp "$MK" "$MK.bak"
 
-        # 清理旧版固定 patch 和旧版追加块。
+        # 清理旧版固定 patch 和旧版追加块，避免重复插入或 hunk failed。
         rm -f "$(dirname "$MK")/patches/999-fix-mbedtls-new-session-ticket-enum.patch" || true
         sed -i '/ChatGPT libwebsockets mbedTLS enum compatibility/,+6d' "$MK" || true
 
@@ -354,7 +386,7 @@ jobs:
             print "# Run after OpenWrt normal prepare/patch phase, before package rules are generated.";
             print "define Build/Prepare";
             print "\t$(call Build/Prepare/Default)";
-            print "\t$(SED) '\''s/MBEDTLS_SSL_SERVER_NEW_SESSION_TICKET/MBEDTLS_SSL_TLS1_3_NEW_SESSION_TICKET/g'\'' $(PKG_BUILD_DIR)/lib/tls/mbedtls/wrapper/platform/ssl_pm.c || true";
+            print "\t$(SED) '''s/MBEDTLS_SSL_SERVER_NEW_SESSION_TICKET/MBEDTLS_SSL_TLS1_3_NEW_SESSION_TICKET/g''' $(PKG_BUILD_DIR)/lib/tls/mbedtls/wrapper/platform/ssl_pm.c || true";
             print "endef";
             done=1;
           }
