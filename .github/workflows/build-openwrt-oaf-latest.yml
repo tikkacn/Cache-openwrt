@@ -260,28 +260,30 @@ jobs:
         echo "✅ OAF 已强制开启"
 
     # =======================================================
-    # 🛠️ 尝试强制 libwebsockets 使用 OpenSSL variant
+    # 🛠️ 强制 libwebsockets 使用 Full(OpenSSL) variant
     # 说明：
-    # 1. 当前完整编译失败点是 libwebsockets-mbedtls 与 mbedTLS API 不兼容
-    # 2. 当前固件本身已经使用 libustream-openssl，TLS 体系更适合统一到 OpenSSL
-    # 3. 这里先在 .config 层面尝试关闭 mbedTLS variant，启用 OpenSSL variant
-    # 4. defconfig 后会在下一步打印实际结果，确认是否被依赖重新拉回 mbedTLS
+    # 1. 你的配置里 owntone 依赖通用 libwebsockets
+    # 2. 当前 feed 中 libwebsockets-mbedtls 和 libwebsockets-full 都 PROVIDES:=libwebsockets
+    # 3. 单独启用 libwebsockets-openssl 不能满足通用 libwebsockets 依赖
+    # 4. 因此这里强制使用 libwebsockets-full，避免继续编译 mbedTLS variant
     # =======================================================
-    - name: Try force libwebsockets OpenSSL variant
+    - name: Force libwebsockets Full OpenSSL variant
       run: |
         cd openwrt
 
-        echo "尝试强制 libwebsockets 使用 OpenSSL variant，避免 mbedTLS API 兼容问题"
+        echo "强制 libwebsockets 使用 Full(OpenSSL) variant，避免 mbedTLS API 兼容问题"
 
-        sed -i '/CONFIG_PACKAGE_libwebsockets-mbedtls/d' .config || true
-        sed -i '/CONFIG_PACKAGE_libwebsockets-openssl/d' .config || true
-        sed -i '/CONFIG_PACKAGE_libwebsockets-full/d' .config || true
+        # 清掉所有 libwebsockets variant 的旧配置，避免 mbedtls / openssl / full 同时存在
+        sed -i '/CONFIG_PACKAGE_libwebsockets/d' .config || true
+        sed -i '/CONFIG_DEFAULT_libwebsockets/d' .config || true
 
+        # libwebsockets-full 提供 libwebsockets 和 libwebsockets-openssl，能满足 owntone/ttyd 等通用依赖
         echo '# CONFIG_PACKAGE_libwebsockets-mbedtls is not set' >> .config
-        echo 'CONFIG_PACKAGE_libwebsockets-openssl=y' >> .config
+        echo '# CONFIG_PACKAGE_libwebsockets-openssl is not set' >> .config
+        echo 'CONFIG_PACKAGE_libwebsockets-full=y' >> .config
 
         echo "========== before defconfig libwebsockets check =========="
-        grep -E "CONFIG_PACKAGE_libwebsockets|CONFIG_PACKAGE_.*mbedtls|CONFIG_PACKAGE_.*openssl" .config || true
+        grep -E "CONFIG_PACKAGE_libwebsockets|CONFIG_DEFAULT_libwebsockets" .config || true
 
     # =======================================================
     # 🛠️ minimal 专用：关闭 vlmcsd
@@ -333,6 +335,21 @@ jobs:
 
         echo "========== libwebsockets / TLS variant check =========="
         grep -E "CONFIG_PACKAGE_libwebsockets|CONFIG_PACKAGE_.*websocket|CONFIG_PACKAGE_.*mbedtls|CONFIG_PACKAGE_.*openssl" .config || true
+
+        echo "========== libwebsockets final guard =========="
+        if grep -q '^CONFIG_PACKAGE_libwebsockets-mbedtls=y' .config; then
+          echo "❌ libwebsockets-mbedtls 仍然被启用，停止编译"
+          grep -E "CONFIG_PACKAGE_libwebsockets|CONFIG_DEFAULT_libwebsockets" .config || true
+          exit 1
+        fi
+
+        if ! grep -q '^CONFIG_PACKAGE_libwebsockets-full=y' .config; then
+          echo "❌ libwebsockets-full 未启用，当前无法确认通用 libwebsockets 依赖由 OpenSSL/Full 变体提供"
+          grep -E "CONFIG_PACKAGE_libwebsockets|CONFIG_DEFAULT_libwebsockets" .config || true
+          exit 1
+        fi
+
+        echo "✅ libwebsockets-mbedtls 未启用，libwebsockets-full 已启用"
 
     - name: Find who depends on libwebsockets-mbedtls
       run: |
