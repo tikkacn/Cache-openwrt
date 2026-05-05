@@ -334,6 +334,16 @@ jobs:
         echo "========== libwebsockets / TLS variant check =========="
         grep -E "CONFIG_PACKAGE_libwebsockets|CONFIG_PACKAGE_.*websocket|CONFIG_PACKAGE_.*mbedtls|CONFIG_PACKAGE_.*openssl" .config || true
 
+    - name: Find who depends on libwebsockets-mbedtls
+      run: |
+        cd openwrt
+
+        echo "========== libwebsockets dependency grep =========="
+        grep -R "libwebsockets-mbedtls\|libwebsockets-openssl\|libwebsockets" package feeds 2>/dev/null | head -n 300 || true
+
+        echo "========== selected websocket related config =========="
+        grep -E "CONFIG_PACKAGE_.*websocket|CONFIG_PACKAGE_libwebsockets" .config || true
+
     - name: Patch xray-plugin for Go 1.23+ (-checklinkname=0)
       run: |
         cd openwrt
