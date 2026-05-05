@@ -138,6 +138,19 @@ jobs:
     - name: Install feeds
       run: cd openwrt && ./scripts/feeds install -a
 
+    - name: Check mbedTLS version
+      run: |
+        cd openwrt
+
+        echo "========== mbedTLS Makefile =========="
+        find package feeds -path "*/mbedtls/Makefile" -print || true
+
+        echo "========== mbedTLS version =========="
+        for f in $(find package feeds -path "*/mbedtls/Makefile" -print); do
+          echo "----- $f -----"
+          grep -E "PKG_NAME:=|PKG_VERSION:=|PKG_RELEASE:=|PKG_HASH:=" "$f" || true
+        done
+
     # =======================================================
     # 🛠️ 修复 vlmcsd + ccache/GNUmakefile 兼容问题
     # 说明：
@@ -247,6 +260,30 @@ jobs:
         echo "✅ OAF 已强制开启"
 
     # =======================================================
+    # 🛠️ 尝试强制 libwebsockets 使用 OpenSSL variant
+    # 说明：
+    # 1. 当前完整编译失败点是 libwebsockets-mbedtls 与 mbedTLS API 不兼容
+    # 2. 当前固件本身已经使用 libustream-openssl，TLS 体系更适合统一到 OpenSSL
+    # 3. 这里先在 .config 层面尝试关闭 mbedTLS variant，启用 OpenSSL variant
+    # 4. defconfig 后会在下一步打印实际结果，确认是否被依赖重新拉回 mbedTLS
+    # =======================================================
+    - name: Try force libwebsockets OpenSSL variant
+      run: |
+        cd openwrt
+
+        echo "尝试强制 libwebsockets 使用 OpenSSL variant，避免 mbedTLS API 兼容问题"
+
+        sed -i '/CONFIG_PACKAGE_libwebsockets-mbedtls/d' .config || true
+        sed -i '/CONFIG_PACKAGE_libwebsockets-openssl/d' .config || true
+        sed -i '/CONFIG_PACKAGE_libwebsockets-full/d' .config || true
+
+        echo '# CONFIG_PACKAGE_libwebsockets-mbedtls is not set' >> .config
+        echo 'CONFIG_PACKAGE_libwebsockets-openssl=y' >> .config
+
+        echo "========== before defconfig libwebsockets check =========="
+        grep -E "CONFIG_PACKAGE_libwebsockets|CONFIG_PACKAGE_.*mbedtls|CONFIG_PACKAGE_.*openssl" .config || true
+
+    # =======================================================
     # 🛠️ minimal 专用：关闭 vlmcsd
     # 说明：
     # 1. vlmcsd 的 GNUmakefile 在开启 ccache 时可能触发编译参数异常
@@ -293,6 +330,9 @@ jobs:
           echo "========== OAF config check =========="
           grep -E "CONFIG_PACKAGE_(luci-app-oaf|open-app-filter|luci-i18n-oaf-zh-cn)=" .config || true
         fi
+
+        echo "========== libwebsockets / TLS variant check =========="
+        grep -E "CONFIG_PACKAGE_libwebsockets|CONFIG_PACKAGE_.*websocket|CONFIG_PACKAGE_.*mbedtls|CONFIG_PACKAGE_.*openssl" .config || true
 
     - name: Patch xray-plugin for Go 1.23+ (-checklinkname=0)
       run: |
@@ -357,8 +397,8 @@ jobs:
         # libwebsockets 4.3.2 的 mbedtls wrapper 在当前 mbedTLS 头文件下
         # 会引用不存在的 MBEDTLS_SSL_SERVER_NEW_SESSION_TICKET。
         # 这里把 Build/Prepare 注入到 BuildPackage 之前，确保每次 prepare 后自动替换。
-        if ! grep -q 'libwebsockets' .config; then
-          echo "当前配置未包含 libwebsockets，跳过"
+        if ! grep -q '^CONFIG_PACKAGE_libwebsockets-mbedtls=y' .config; then
+          echo "当前配置未启用 libwebsockets-mbedtls，跳过 mbedTLS 专用补丁"
           exit 0
         fi
 
