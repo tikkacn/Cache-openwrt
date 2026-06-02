@@ -1,0 +1,11 @@
+Backup marker before rewriting reusable OpenWrt cloud build workflow.
+
+Original main commit before rewrite:
+614dbbc161b82cdea69ca8fef5bbdcb03ab7a4ca
+
+Rollback options:
+1. Use backup branch backup/reuse-workflow-before-20260602 if created.
+2. Or reset main to commit 614dbbc161b82cdea69ca8fef5bbdcb03ab7a4ca.
+
+Reason for change:
+The previous full build likely did not reliably reuse the minimal build output. The new workflow will make minimal build produce a reusable seed artifact, and full build must restore it before compiling.
