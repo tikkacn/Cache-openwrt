@@ -1,658 +1,516 @@
-name: Build OpenWrt-x86_64 (Latest OAF)
+name: Build OpenWrt-x86_64 (Seed Reuse + Latest OAF)
 
 on:
-  repository_dispatch:
   workflow_dispatch:
     inputs:
-      config_file:
-        description: '选择配置文件'
+      clean_seed:
+        description: '清空 seed 缓存后重新生成 minimal 成果'
         required: true
-        default: 'x86_64.config'
-        type: choice
-        options:
-          - 'x86_64.config'
-          - 'minimal.config'
-      clean:
-        description: 'clean ccache'
         default: false
         type: boolean
+      full_make_jobs:
+        description: 'full 编译并行数，默认 nproc；不稳时填 2'
+        required: false
+        default: 'auto'
+        type: choice
+        options:
+          - auto
+          - '2'
+          - '3'
+          - '4'
   schedule:
+    # 每周一、四北京时间 00:00 运行：先 minimal seed，再 full。
     - cron: '0 16 * * 1,4'
-  watch:
-    types: started
+
+permissions:
+  contents: write
+  actions: write
+
+concurrency:
+  group: openwrt-x86-64-seed-reuse
+  cancel-in-progress: false
 
 env:
   REPO_URL: https://github.com/coolsnowwolf/lede
   REPO_BRANCH: master
   FEEDS_CONF: feeds.conf.default
-  UPLOAD_BIN_DIR: false
-  UPLOAD_FIRMWARE: true
-  UPLOAD_COWTRANSFER: false
-  UPLOAD_WETRANSFER: false
-  UPLOAD_RELEASE: true
   TZ: Asia/Shanghai
-  CUSTOM_SUFFIX: "_NewOAF"
+  CUSTOM_SUFFIX: _NewOAF_Reuse
+  SEED_NAME: openwrt-x86-64-minimal-seed
+  SEED_TAR: openwrt-x86-64-minimal-seed.tar.zst
+  UPLOAD_RELEASE: true
 
 jobs:
-  build:
+  minimal_seed:
+    name: 1 / 2 minimal seed build
     runs-on: ubuntu-latest
-    timeout-minutes: 1000
+    timeout-minutes: 340
 
     steps:
-    - name: Check Server Performance
-      run: |
-        echo "警告⚠"
-        echo "分配的服务器性能有限，若选择的插件过多，务必注意CPU性能！"
-        echo -e "已知CPU型号（降序）：7763，8370C，8272CL，8171M，E5-2673 \n"
-        echo "--------------------------CPU信息--------------------------"
-        echo "CPU物理数量：$(cat /proc/cpuinfo | grep "physical id" | sort | uniq | wc -l)"
-        echo -e "CPU核心信息：$(cat /proc/cpuinfo | grep name | cut -f2 -d: | uniq -c) \n"
-        echo "--------------------------内存信息--------------------------"
-        echo "已安装内存详细信息："
-        echo -e "$(sudo lshw -short -C memory | grep GiB) \n"
-        echo "--------------------------硬盘信息--------------------------"
-        echo "硬盘数量：$(ls /dev/sd* | grep -v [1-9] | wc -l)" && df -hT
-
-    - name: "Optimize Disk Space"
-      uses: "hugoalh/disk-space-optimizer-ghaction@main"
-      with:
-        operate_sudo: "True"
-        general_include: ".+"
-        general_exclude: |-
-          ^GCC$
-          ^G\+\+$
-          Clang
-          LLVM
-        docker_include: ".+"
-        docker_prune: "True"
-        docker_clean: "True"
-        apt_prune: "True"
-        apt_clean: "True"
-        homebrew_prune: "True"
-        homebrew_clean: "True"
-        npm_prune: "True"
-        npm_clean: "True"
-        os_swap: "True"
-
-    - name: Initialization environment
-      env:
-        DEBIAN_FRONTEND: noninteractive
-      run: |
-        sudo -E apt update -y
-        sudo -E apt install -y ack antlr3 asciidoc autoconf automake autopoint binutils bison build-essential \
-        bzip2 ccache clang cmake cpio curl device-tree-compiler flex gawk gcc-multilib g++-multilib gettext \
-        genisoimage git gperf haveged help2man intltool libc6-dev-i386 libelf-dev libfuse-dev libglib2.0-dev \
-        libgmp3-dev libltdl-dev libmpc-dev libmpfr-dev libncurses5-dev libncursesw5-dev libpython3-dev \
-        libreadline-dev libssl-dev libtool llvm lrzsz libnsl-dev ninja-build p7zip p7zip-full patch pkgconf \
-        python3 python3-pyelftools python3-setuptools qemu-utils rsync scons squashfs-tools subversion \
-        swig texinfo uglifyjs upx-ucl unzip vim wget xmlto xxd zlib1g-dev
-        sudo -E apt-get -y autoremove --purge
-        sudo -E apt-get clean
-        sudo timedatectl set-timezone "$TZ"
-        sudo chown $USER:$GROUPS $GITHUB_WORKSPACE
-
-    - name: Freeing up disk space
-      uses: easimon/maximize-build-space@master
-      with:
-        root-reserve-mb: 1024
-        swap-size-mb: 1
-        remove-dotnet: 'true'
-        remove-android: 'true'
-        remove-haskell: 'true'
-        remove-codeql: 'true'
-        remove-docker-images: 'true'
-
-    - name: Free up disk space complete
-      run: |
-        echo "Free up disk space complete"
-        echo "=============================================================================="
-        df -hT
-        echo "=============================================================================="
-
-    - name: Checkout
-      uses: actions/checkout@main
-
-    - name: Set config file name
-      run: |
-        if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
-          CONFIG_FILE="${{ github.event.inputs.config_file }}"
-        else
-          CONFIG_FILE="x86_64.config"
-        fi
-        echo "CONFIG_FILE=${CONFIG_FILE}" >> $GITHUB_ENV
-        echo "使用配置文件: ${CONFIG_FILE}"
-
-    - name: Clone source code
-      run: |
-        git clone --depth=1 $REPO_URL -b $REPO_BRANCH openwrt
-
-    - name: Copy custom feeds.conf.default
-      run: cp feeds.conf.default openwrt/feeds.conf.default
-
-    - name: Print actual feeds.conf.default
-      run: cat openwrt/feeds.conf.default
-
-    - name: Update feeds
-      run: cd openwrt && ./scripts/feeds update -a
-
-    - name: Install feeds
-      run: cd openwrt && ./scripts/feeds install -a
-
-    - name: Check mbedTLS version
-      run: |
-        cd openwrt
-
-        echo "========== mbedTLS Makefile =========="
-        find package feeds -path "*/mbedtls/Makefile" -print || true
-
-        echo "========== mbedTLS version =========="
-        for f in $(find package feeds -path "*/mbedtls/Makefile" -print); do
-          echo "----- $f -----"
-          grep -E "PKG_NAME:=|PKG_VERSION:=|PKG_RELEASE:=|PKG_HASH:=" "$f" || true
-        done
-
-    # =======================================================
-    # 🛠️ 修复 vlmcsd + ccache/GNUmakefile 兼容问题
-    # 说明：
-    # 1. vlmcsd 的 GNUmakefile 对 CC="ccache xxx-gcc" 兼容不好
-    # 2. 不能只替换 TARGET_CC，因为该包 Makefile 实际通过 TARGET_CONFIGURE_OPTS 传入 CC/AS
-    # 3. 这里在 BuildPackage 之前覆盖 CC/GCC/AS，并强制 MAX_THREADS=1
-    # =======================================================
-    - name: Patch vlmcsd build options
-      run: |
-        cd openwrt
-
-        MK="feeds/packages/net/vlmcsd/Makefile"
-        if [ ! -f "$MK" ]; then
-          MK="$(find feeds package -path '*/vlmcsd/Makefile' | head -n 1)"
-        fi
-
-        if [ -z "$MK" ] || [ ! -f "$MK" ]; then
-          echo "vlmcsd Makefile not found, skip patch"
-          exit 0
-        fi
-
-        echo "========== Patching vlmcsd Makefile =========="
-        echo "Makefile: $MK"
-        cp "$MK" "$MK.bak"
-
-        # 清理旧补丁，避免重复插入。
-        sed -i '/ChatGPT vlmcsd ccache workaround/d' "$MK" || true
-        sed -i '/MAKE_FLAGS .*TARGET_CC_NOCACHE.*MAX_THREADS/d' "$MK" || true
-        sed -i '/MAKE_FLAGS += MAX_THREADS=1/d' "$MK" || true
-
-        # 必须插入到 $(eval $(call BuildPackage,vlmcsd)) 之前，否则 OpenWrt 已经生成包规则，补丁不会生效。
-        awk '
-          /^\$\(eval \$\(call BuildPackage,vlmcsd\)\)/ && !done {
-            print "# ChatGPT vlmcsd ccache workaround: force no-ccache compiler and internal single thread";
-            print "MAKE_FLAGS += CC=\"$(TARGET_CC_NOCACHE)\" GCC=\"$(TARGET_CC_NOCACHE)\" AS=\"$(TARGET_CC_NOCACHE) -c $(TARGET_CFLAGS)\" MAX_THREADS=1";
-            done=1;
-          }
-          { print }
-        ' "$MK" > "$MK.tmp"
-        mv "$MK.tmp" "$MK"
-
-        echo "========== Verify vlmcsd patch =========="
-        grep -n "ChatGPT vlmcsd\|MAKE_FLAGS .*TARGET_CC_NOCACHE\|BuildPackage,vlmcsd" "$MK" || true
-        echo "✅ vlmcsd 已在 BuildPackage 之前强制无 ccache + 内部单线程编译"
-
-
-    # =======================================================
-    # 🛠️ 补丁1：强制下载最新版 OAF 源码
-    # 说明：
-    # 1. 放在 feeds install 后面，避免 feeds 后续又装回旧 OAF
-    # 2. minimal.config 也会拉取最新版源码，但不会强制启用 OAF
-    # =======================================================
-    - name: Force Install Latest OAF (OpenAppFilter)
-      run: |
-        cd openwrt
-        echo "正在执行 OAF 强制替换策略..."
-
-        echo "========== 删除旧 OAF 包 =========="
-        find feeds package -name "luci-app-oaf" -prune -exec rm -rf {} + || true
-        find feeds package -name "open-app-filter" -prune -exec rm -rf {} + || true
-        find feeds package -name "OpenAppFilter" -prune -exec rm -rf {} + || true
-        rm -rf package/OpenAppFilter || true
-
-        echo "========== 克隆最新版 OAF =========="
-        git clone --depth=1 https://github.com/destan19/OpenAppFilter.git package/OpenAppFilter
-
-        echo "========== OAF Makefile 检查 =========="
-        find package/OpenAppFilter -maxdepth 5 -name Makefile -print || true
-
-        echo "========== OAF 版本检查 =========="
-        grep -R "PKG_VERSION:=" package/OpenAppFilter 2>/dev/null || true
-        grep -R "PKG_SOURCE_VERSION:=" package/OpenAppFilter 2>/dev/null || true
-
-        echo "✅ 已强制替换为最新版 OAF"
-
-    - name: Load custom configuration
-      run: |
-        [ -e files ] && mv files openwrt/files
-        [ -e ${{ env.CONFIG_FILE }} ] && mv ${{ env.CONFIG_FILE }} openwrt/.config
-        echo "已加载配置文件: ${{ env.CONFIG_FILE }}"
-
-    # =======================================================
-    # 🛠️ 补丁2：强制在 .config 中开启 OAF
-    # 说明：
-    # 1. x86_64.config 强制启用 OAF
-    # 2. minimal.config 跳过强制启用，保持 minimal 的缓存构建目的
-    # =======================================================
-    - name: Force Enable OAF in .config
-      run: |
-        cd openwrt
-
-        if [ "${{ env.CONFIG_FILE }}" = "minimal.config" ]; then
-          echo "当前是 minimal.config，跳过强制启用 OAF"
-          exit 0
-        fi
-
-        echo "Force enabling OAF packages..."
-
-        sed -i '/CONFIG_PACKAGE_luci-app-oaf/d' .config || true
-        sed -i '/CONFIG_PACKAGE_open-app-filter/d' .config || true
-        sed -i '/CONFIG_PACKAGE_luci-i18n-oaf-zh-cn/d' .config || true
-
-        echo "CONFIG_PACKAGE_luci-app-oaf=y" >> .config
-        echo "CONFIG_PACKAGE_open-app-filter=y" >> .config
-        echo "CONFIG_PACKAGE_luci-i18n-oaf-zh-cn=y" >> .config
-
-        echo "✅ OAF 已强制开启"
-
-    # =======================================================
-    # 🛠️ 强制 libwebsockets 使用 Full(OpenSSL) variant
-    # 说明：
-    # 1. 你的配置里 owntone 依赖通用 libwebsockets
-    # 2. 当前 feed 中 libwebsockets-mbedtls 和 libwebsockets-full 都 PROVIDES:=libwebsockets
-    # 3. 单独启用 libwebsockets-openssl 不能满足通用 libwebsockets 依赖
-    # 4. 因此这里强制使用 libwebsockets-full，避免继续编译 mbedTLS variant
-    # =======================================================
-    - name: Force libwebsockets Full OpenSSL variant
-      run: |
-        cd openwrt
-
-        echo "强制 libwebsockets 使用 Full(OpenSSL) variant，避免 mbedTLS API 兼容问题"
-
-        # 清掉所有 libwebsockets variant 的旧配置，避免 mbedtls / openssl / full 同时存在
-        sed -i '/CONFIG_PACKAGE_libwebsockets/d' .config || true
-        sed -i '/CONFIG_DEFAULT_libwebsockets/d' .config || true
-
-        # libwebsockets-full 提供 libwebsockets 和 libwebsockets-openssl，能满足 owntone/ttyd 等通用依赖
-        echo '# CONFIG_PACKAGE_libwebsockets-mbedtls is not set' >> .config
-        echo '# CONFIG_PACKAGE_libwebsockets-openssl is not set' >> .config
-        echo 'CONFIG_PACKAGE_libwebsockets-full=y' >> .config
-
-        echo "========== before defconfig libwebsockets check =========="
-        grep -E "CONFIG_PACKAGE_libwebsockets|CONFIG_DEFAULT_libwebsockets" .config || true
-
-    # =======================================================
-    # 🛠️ minimal 专用：关闭 vlmcsd
-    # 说明：
-    # 1. vlmcsd 的 GNUmakefile 在开启 ccache 时可能触发编译参数异常
-    # 2. minimal.config 只用于生成基础缓存，不需要编译 vlmcsd
-    # 3. full x86_64.config 仍保留 vlmcsd，并通过前面的 Patch vlmcsd build options 禁用 ccache + 内部单线程
-    # =======================================================
-    - name: Disable vlmcsd in minimal.config
-      run: |
-        cd openwrt
-
-        if [ "${{ env.CONFIG_FILE }}" != "minimal.config" ]; then
-          echo "当前不是 minimal.config，跳过关闭 vlmcsd"
-          exit 0
-        fi
-
-        echo "当前是 minimal.config，关闭 vlmcsd，避免 ccache/GNUmakefile 编译问题"
-
-        sed -i '/CONFIG_DEFAULT_luci-app-vlmcsd/d' .config || true
-        sed -i '/CONFIG_PACKAGE_luci-app-vlmcsd/d' .config || true
-        sed -i '/CONFIG_PACKAGE_luci-i18n-vlmcsd/d' .config || true
-        sed -i '/CONFIG_PACKAGE_vlmcsd/d' .config || true
-
-        echo '# CONFIG_DEFAULT_luci-app-vlmcsd is not set' >> .config
-        echo '# CONFIG_PACKAGE_luci-app-vlmcsd is not set' >> .config
-        echo '# CONFIG_PACKAGE_luci-i18n-vlmcsd-zh-cn is not set' >> .config
-        echo '# CONFIG_PACKAGE_vlmcsd is not set' >> .config
-
-        echo "✅ minimal.config 已关闭 vlmcsd"
-
-    - name: Make defconfig and check .config
-      run: |
-        cd openwrt
-        make defconfig
-
-        echo "========== Target check =========="
-        grep -E "^CONFIG_TARGET|^CONFIG_TARGET_.*DEVICE.*=y" .config | head -n 100 || true
-
-        echo "========== vlmcsd config check =========="
-        grep -E "CONFIG_PACKAGE_vlmcsd=|# CONFIG_PACKAGE_vlmcsd is not set" .config || true
-
-        if [ "${{ env.CONFIG_FILE }}" = "minimal.config" ]; then
-          echo "当前是 minimal.config，不要求 OAF 启用"
-        else
-          echo "========== OAF config check =========="
-          grep -E "CONFIG_PACKAGE_(luci-app-oaf|open-app-filter|luci-i18n-oaf-zh-cn)=" .config || true
-        fi
-
-        echo "========== libwebsockets / TLS variant check =========="
-        grep -E "CONFIG_PACKAGE_libwebsockets|CONFIG_PACKAGE_.*websocket|CONFIG_PACKAGE_.*mbedtls|CONFIG_PACKAGE_.*openssl" .config || true
-
-        echo "========== libwebsockets final guard =========="
-        if grep -q '^CONFIG_PACKAGE_libwebsockets-mbedtls=y' .config; then
-          echo "❌ libwebsockets-mbedtls 仍然被启用，停止编译"
-          grep -E "CONFIG_PACKAGE_libwebsockets|CONFIG_DEFAULT_libwebsockets" .config || true
-          exit 1
-        fi
-
-        if ! grep -q '^CONFIG_PACKAGE_libwebsockets-full=y' .config; then
-          echo "❌ libwebsockets-full 未启用，当前无法确认通用 libwebsockets 依赖由 OpenSSL/Full 变体提供"
-          grep -E "CONFIG_PACKAGE_libwebsockets|CONFIG_DEFAULT_libwebsockets" .config || true
-          exit 1
-        fi
-
-        echo "✅ libwebsockets-mbedtls 未启用，libwebsockets-full 已启用"
-
-    - name: Find who depends on libwebsockets-mbedtls
-      run: |
-        cd openwrt
-
-        echo "========== libwebsockets dependency grep =========="
-        grep -R "libwebsockets-mbedtls\|libwebsockets-openssl\|libwebsockets" package feeds 2>/dev/null | head -n 300 || true
-
-        echo "========== selected websocket related config =========="
-        grep -E "CONFIG_PACKAGE_.*websocket|CONFIG_PACKAGE_libwebsockets" .config || true
-
-    - name: Patch xray-plugin for Go 1.23+ (-checklinkname=0)
-      run: |
-        cd openwrt
-        MK="feeds/helloworld/xray-plugin/Makefile"
-
-        if [ ! -f "$MK" ]; then
-          echo "xray-plugin Makefile not found, skip patch: $MK"
-          exit 0
-        fi
-
-        echo "✅ Patching $MK ..."
-        grep -q 'checklinkname=0' "$MK" || sed -i '/golang-package.mk/i GO_PKG_LDFLAGS += -checklinkname=0\n' "$MK"
-
-        echo "==== Verify patch ===="
-        grep -n 'GO_PKG_LDFLAGS' "$MK" || true
-
-    - name: Set default LAN IP to 192.168.0.1
-      run: |
-        cd openwrt
-        sed -i 's/192.168.1.1/192.168.0.1/g' package/base-files/files/bin/config_generate || true
-        sed -i 's/192.168.1.1/192.168.0.1/g' package/base-files/luci2/bin/config_generate || true
-
-    - name: Get architecture
-      working-directory: ${{ github.workspace }}/openwrt
-      run: |
-        TARGET_DEVICE_ARCH="$(grep "^CONFIG_TARGET_.*=y$" ".config" | head -n 1 | sed 's/^CONFIG_TARGET_//g' | sed 's/=y//g'| awk -F '_' '{print $1}')"
-        echo "TARGET_DEVICE_ARCH=${TARGET_DEVICE_ARCH}" >>$GITHUB_ENV
-
-    - name: Set build type for naming
-      run: |
-        if [ "${{ env.CONFIG_FILE }}" = "minimal.config" ]; then
-          echo "BUILD_TYPE=_minimal" >> $GITHUB_ENV
-        else
-          echo "BUILD_TYPE=" >> $GITHUB_ENV
-        fi
-
-    - name: cache
-      uses: stupidloud/cachewrtbuild@main
-      timeout-minutes: 20
-      continue-on-error: true
-      with:
-        ccache: 'true'
-        toolchain: 'true'
-        mixkey: wrt-x86_64-cache-${{ env.TARGET_DEVICE_ARCH }}
-        clean: ${{ github.event.inputs.clean == 'true' || github.event.inputs.config_file == 'minimal.config' }}
-        prefix: ${{ github.workspace }}/openwrt
-
-    - name: Download package
-      run: |
-        cd openwrt
-        echo -e 'CONFIG_DEVEL=y\nCONFIG_CCACHE=y' >> .config
-        make defconfig
-        make download -j$(nproc)
-        find dl -size -1024c -exec ls -l {} \;
-        find dl -size -1024c -exec rm -f {} \;
-
-    - name: Patch libwebsockets for newer mbedTLS
-      run: |
-        cd openwrt
-
-        # libwebsockets 4.3.2 的 mbedtls wrapper 在当前 mbedTLS 头文件下
-        # 会引用不存在的 MBEDTLS_SSL_SERVER_NEW_SESSION_TICKET。
-        # 这里把 Build/Prepare 注入到 BuildPackage 之前，确保每次 prepare 后自动替换。
-        if ! grep -q '^CONFIG_PACKAGE_libwebsockets-mbedtls=y' .config; then
-          echo "当前配置未启用 libwebsockets-mbedtls，跳过 mbedTLS 专用补丁"
-          exit 0
-        fi
-
-        MK="feeds/packages/libs/libwebsockets/Makefile"
-        if [ ! -f "$MK" ]; then
-          MK="$(find feeds package -path '*/libwebsockets/Makefile' | head -n 1)"
-        fi
-
-        if [ -z "$MK" ] || [ ! -f "$MK" ]; then
-          echo "libwebsockets Makefile not found, skip patch"
-          exit 0
-        fi
-
-        echo "========== Patching libwebsockets Makefile =========="
-        echo "Makefile: $MK"
-        cp "$MK" "$MK.bak"
-
-        # 清理旧版固定 patch 和旧版追加块，避免重复插入或 hunk failed。
-        rm -f "$(dirname "$MK")/patches/999-fix-mbedtls-new-session-ticket-enum.patch" || true
-        sed -i '/ChatGPT libwebsockets mbedTLS enum compatibility/,+6d' "$MK" || true
-
-        awk '
-          /^\$\(eval \$\(call BuildPackage,libwebsockets/ && !done {
-            print "# ChatGPT libwebsockets mbedTLS enum compatibility";
-            print "# Run after OpenWrt normal prepare/patch phase, before package rules are generated.";
-            print "define Build/Prepare";
-            print "\t$(call Build/Prepare/Default)";
-            print "\t$(SED) '''s/MBEDTLS_SSL_SERVER_NEW_SESSION_TICKET/MBEDTLS_SSL_TLS1_3_NEW_SESSION_TICKET/g''' $(PKG_BUILD_DIR)/lib/tls/mbedtls/wrapper/platform/ssl_pm.c || true";
-            print "endef";
-            done=1;
-          }
-          { print }
-        ' "$MK" > "$MK.tmp"
-        mv "$MK.tmp" "$MK"
-
-        echo "========== Verify libwebsockets Makefile patch =========="
-        grep -n "ChatGPT libwebsockets\|MBEDTLS_SSL_SERVER_NEW_SESSION_TICKET\|Build/Prepare\|BuildPackage,libwebsockets" "$MK" || true
-
-        if ! grep -q "ChatGPT libwebsockets mbedTLS enum compatibility" "$MK"; then
-          echo "❌ libwebsockets patch insert failed"
-          exit 1
-        fi
-
-        echo "✅ libwebsockets 已在 BuildPackage 之前注入 prepare 后 sed"
-
-    - name: Compile the firmware
-      id: compile
-      run: |
-        cd openwrt
-        echo -e "$(nproc) thread compile"
-
-        set +e
-
-        echo "========== 第 1 次：正常激进并行编译 =========="
-        make -j$(($(nproc)+1)) 2>&1 | tee build.log
-        BUILD_STATUS=${PIPESTATUS[0]}
-
-        if [ "$BUILD_STATUS" -ne 0 ]; then
-          echo "========== 并行编译失败，尝试提取失败包 =========="
-
-          FAILED_PKG=""
-
-          # 优先匹配 OpenWrt 常见错误格式：
-          # ERROR: package/xxx failed to build.
-          FAILED_PKG=$(grep -Eo 'ERROR: package/[^ ]+ failed to build' build.log | tail -n 1 | sed -E 's#ERROR: (package/[^ ]+) failed to build#\1#')
-
-          # 兼容 make[x] -C package/xxx compile 格式
-          if [ -z "$FAILED_PKG" ]; then
-            FAILED_PKG=$(grep -Eo 'make\[[0-9]+\] -C (package|feeds)/[^ ]+ (compile|install)' build.log | tail -n 1 | sed -E 's#.* -C ((package|feeds)/[^ ]+) .*#\1#')
+      - name: Check server performance
+        run: |
+          echo "-------------------------- CPU --------------------------"
+          lscpu || true
+          echo "-------------------------- MEMORY -----------------------"
+          free -h || true
+          echo "-------------------------- DISK -------------------------"
+          df -hT || true
+
+      - name: Free disk space early
+        uses: easimon/maximize-build-space@master
+        with:
+          root-reserve-mb: 1024
+          swap-size-mb: 1
+          remove-dotnet: 'true'
+          remove-android: 'true'
+          remove-haskell: 'true'
+          remove-codeql: 'true'
+          remove-docker-images: 'true'
+
+      - name: Init build environment
+        env:
+          DEBIAN_FRONTEND: noninteractive
+        run: |
+          sudo -E apt update -y
+          sudo -E apt install -y ack antlr3 asciidoc autoconf automake autopoint binutils bison build-essential \
+            bzip2 ccache clang cmake cpio curl device-tree-compiler flex gawk gcc-multilib g++-multilib gettext \
+            genisoimage git gperf haveged help2man intltool libc6-dev-i386 libelf-dev libfuse-dev libglib2.0-dev \
+            libgmp3-dev libltdl-dev libmpc-dev libmpfr-dev libncurses5-dev libncursesw5-dev libpython3-dev \
+            libreadline-dev libssl-dev libtool llvm lrzsz libnsl-dev ninja-build p7zip p7zip-full patch pkgconf \
+            python3 python3-pyelftools python3-setuptools qemu-utils rsync scons squashfs-tools subversion \
+            swig texinfo uglifyjs upx-ucl unzip vim wget xmlto xxd zlib1g-dev zstd
+          sudo -E apt-get -y autoremove --purge
+          sudo -E apt-get clean
+          sudo timedatectl set-timezone "$TZ"
+          sudo chown -R $USER:$USER "$GITHUB_WORKSPACE"
+
+      - name: Checkout workflow repository
+        uses: actions/checkout@v4
+
+      - name: Clone OpenWrt source
+        run: |
+          git clone --depth=1 "$REPO_URL" -b "$REPO_BRANCH" openwrt
+          cp "$FEEDS_CONF" openwrt/feeds.conf.default
+
+      - name: Update and install feeds
+        run: |
+          cd openwrt
+          ./scripts/feeds update -a
+          ./scripts/feeds install -a
+
+      - name: Apply common source patches
+        run: |
+          cd openwrt
+
+          echo "========== Patch vlmcsd build options =========="
+          MK="feeds/packages/net/vlmcsd/Makefile"
+          [ -f "$MK" ] || MK="$(find feeds package -path '*/vlmcsd/Makefile' | head -n 1)"
+          if [ -n "$MK" ] && [ -f "$MK" ]; then
+            sed -i '/ChatGPT vlmcsd ccache workaround/d' "$MK" || true
+            sed -i '/MAKE_FLAGS .*TARGET_CC_NOCACHE.*MAX_THREADS/d' "$MK" || true
+            sed -i '/MAKE_FLAGS += MAX_THREADS=1/d' "$MK" || true
+            awk '
+              /^\$\(eval \$\(call BuildPackage,vlmcsd\)\)/ && !done {
+                print "# ChatGPT vlmcsd ccache workaround: force no-ccache compiler and internal single thread";
+                print "MAKE_FLAGS += CC=\"$(TARGET_CC_NOCACHE)\" GCC=\"$(TARGET_CC_NOCACHE)\" AS=\"$(TARGET_CC_NOCACHE) -c $(TARGET_CFLAGS)\" MAX_THREADS=1";
+                done=1;
+              }
+              { print }
+            ' "$MK" > "$MK.tmp" && mv "$MK.tmp" "$MK"
           fi
 
-          # 兼容 package/xxx/compile 或 package/xxx/install 格式
-          if [ -z "$FAILED_PKG" ]; then
-            FAILED_PKG=$(grep -Eo 'package/[^ ]+/(compile|install)' build.log | tail -n 1 | sed 's#/compile##;s#/install##')
+          echo "========== Force install latest OAF =========="
+          find feeds package -name "luci-app-oaf" -prune -exec rm -rf {} + || true
+          find feeds package -name "open-app-filter" -prune -exec rm -rf {} + || true
+          find feeds package -name "OpenAppFilter" -prune -exec rm -rf {} + || true
+          rm -rf package/OpenAppFilter || true
+          git clone --depth=1 https://github.com/destan19/OpenAppFilter.git package/OpenAppFilter
+
+          echo "========== Patch xray-plugin for Go 1.23+ =========="
+          XRAY_MK="feeds/helloworld/xray-plugin/Makefile"
+          if [ -f "$XRAY_MK" ]; then
+            grep -q 'checklinkname=0' "$XRAY_MK" || sed -i '/golang-package.mk/i GO_PKG_LDFLAGS += -checklinkname=0\n' "$XRAY_MK"
           fi
 
-          if [ -n "$FAILED_PKG" ]; then
-            echo "检测到疑似失败包: $FAILED_PKG"
+          echo "========== Set default LAN IP =========="
+          sed -i 's/192.168.1.1/192.168.0.1/g' package/base-files/files/bin/config_generate || true
+          sed -i 's/192.168.1.1/192.168.0.1/g' package/base-files/luci2/bin/config_generate || true
 
-            echo "========== 清理失败包 =========="
-            make "$FAILED_PKG/clean" V=s || true
+      - name: Load minimal configuration
+        run: |
+          cd openwrt
+          cp ../minimal.config .config
 
-            echo "========== 单线程详细重试失败包 =========="
-            make "$FAILED_PKG/compile" -j1 V=s
-            RETRY_STATUS=$?
+          echo "========== minimal 专用：关闭 vlmcsd / OAF，专注生成通用 seed =========="
+          sed -i '/CONFIG_DEFAULT_luci-app-vlmcsd/d' .config || true
+          sed -i '/CONFIG_PACKAGE_luci-app-vlmcsd/d' .config || true
+          sed -i '/CONFIG_PACKAGE_luci-i18n-vlmcsd/d' .config || true
+          sed -i '/CONFIG_PACKAGE_vlmcsd/d' .config || true
+          echo '# CONFIG_DEFAULT_luci-app-vlmcsd is not set' >> .config
+          echo '# CONFIG_PACKAGE_luci-app-vlmcsd is not set' >> .config
+          echo '# CONFIG_PACKAGE_luci-i18n-vlmcsd-zh-cn is not set' >> .config
+          echo '# CONFIG_PACKAGE_vlmcsd is not set' >> .config
 
-            if [ "$RETRY_STATUS" -ne 0 ]; then
-              echo "失败包单独重试仍失败，进入全局单线程详细编译"
-              make -j1 V=s
-              FINAL_STATUS=$?
-            else
-              echo "失败包单独重试成功，恢复激进并行完整编译"
-              make -j$(($(nproc)+1))
-              FINAL_STATUS=$?
-            fi
+          echo -e 'CONFIG_DEVEL=y\nCONFIG_CCACHE=y' >> .config
+          make defconfig
+
+      - name: Restore persistent ccache
+        uses: actions/cache/restore@v4
+        with:
+          path: ~/.ccache
+          key: ccache-openwrt-x86-64-${{ runner.os }}-${{ hashFiles('minimal.config', 'feeds.conf.default') }}
+          restore-keys: |
+            ccache-openwrt-x86-64-${{ runner.os }}-
+
+      - name: Download source packages
+        run: |
+          cd openwrt
+          make download -j$(nproc)
+          find dl -size -1024c -exec rm -f {} \;
+
+      - name: Build minimal seed
+        id: compile_seed
+        run: |
+          cd openwrt
+          set -o pipefail
+          make -j$(nproc) 2>&1 | tee ../minimal-build.log
+          echo "status=success" >> "$GITHUB_OUTPUT"
+
+      - name: Print ccache stats
+        if: always()
+        run: |
+          ccache -s || true
+
+      - name: Save persistent ccache
+        if: always()
+        uses: actions/cache/save@v4
+        with:
+          path: ~/.ccache
+          key: ccache-openwrt-x86-64-${{ runner.os }}-${{ hashFiles('minimal.config', 'feeds.conf.default') }}-${{ github.run_id }}
+
+      - name: Pack reusable seed artifact
+        if: steps.compile_seed.outputs.status == 'success'
+        run: |
+          cd openwrt
+          echo "========== Seed paths to pack =========="
+          mkdir -p ../seed-pack
+          du -sh dl staging_dir build_dir ~/.ccache 2>/dev/null || true
+
+          tar --zstd -cf "../seed-pack/${SEED_TAR}" \
+            dl \
+            staging_dir/host* \
+            staging_dir/toolchain-* \
+            build_dir/host* \
+            build_dir/toolchain-* \
+            .config \
+            ../minimal-build.log \
+            -C "$HOME" .ccache
+
+          cd ../seed-pack
+          sha256sum "${SEED_TAR}" > "${SEED_TAR}.sha256"
+          ls -lh
+
+      - name: Upload reusable seed artifact
+        if: steps.compile_seed.outputs.status == 'success'
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ env.SEED_NAME }}-${{ github.run_id }}
+          path: seed-pack/*
+          retention-days: 7
+          if-no-files-found: error
+
+      - name: Upload minimal failure logs
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: minimal-failure-logs-${{ github.run_id }}
+          path: |
+            minimal-build.log
+            openwrt/logs
+            openwrt/.config
+          retention-days: 7
+
+  full_build:
+    name: 2 / 2 full build from minimal seed
+    runs-on: ubuntu-latest
+    needs: minimal_seed
+    timeout-minutes: 340
+
+    steps:
+      - name: Check server performance
+        run: |
+          echo "-------------------------- CPU --------------------------"
+          lscpu || true
+          echo "-------------------------- MEMORY -----------------------"
+          free -h || true
+          echo "-------------------------- DISK -------------------------"
+          df -hT || true
+
+      - name: Free disk space early
+        uses: easimon/maximize-build-space@master
+        with:
+          root-reserve-mb: 1024
+          swap-size-mb: 1
+          remove-dotnet: 'true'
+          remove-android: 'true'
+          remove-haskell: 'true'
+          remove-codeql: 'true'
+          remove-docker-images: 'true'
+
+      - name: Init build environment
+        env:
+          DEBIAN_FRONTEND: noninteractive
+        run: |
+          sudo -E apt update -y
+          sudo -E apt install -y ack antlr3 asciidoc autoconf automake autopoint binutils bison build-essential \
+            bzip2 ccache clang cmake cpio curl device-tree-compiler flex gawk gcc-multilib g++-multilib gettext \
+            genisoimage git gperf haveged help2man intltool libc6-dev-i386 libelf-dev libfuse-dev libglib2.0-dev \
+            libgmp3-dev libltdl-dev libmpc-dev libmpfr-dev libncurses5-dev libncursesw5-dev libpython3-dev \
+            libreadline-dev libssl-dev libtool llvm lrzsz libnsl-dev ninja-build p7zip p7zip-full patch pkgconf \
+            python3 python3-pyelftools python3-setuptools qemu-utils rsync scons squashfs-tools subversion \
+            swig texinfo uglifyjs upx-ucl unzip vim wget xmlto xxd zlib1g-dev zstd
+          sudo -E apt-get -y autoremove --purge
+          sudo -E apt-get clean
+          sudo timedatectl set-timezone "$TZ"
+          sudo chown -R $USER:$USER "$GITHUB_WORKSPACE"
+
+      - name: Checkout workflow repository
+        uses: actions/checkout@v4
+
+      - name: Clone OpenWrt source
+        run: |
+          git clone --depth=1 "$REPO_URL" -b "$REPO_BRANCH" openwrt
+          cp "$FEEDS_CONF" openwrt/feeds.conf.default
+
+      - name: Update and install feeds
+        run: |
+          cd openwrt
+          ./scripts/feeds update -a
+          ./scripts/feeds install -a
+
+      - name: Apply common source patches
+        run: |
+          cd openwrt
+
+          echo "========== Patch vlmcsd build options =========="
+          MK="feeds/packages/net/vlmcsd/Makefile"
+          [ -f "$MK" ] || MK="$(find feeds package -path '*/vlmcsd/Makefile' | head -n 1)"
+          if [ -n "$MK" ] && [ -f "$MK" ]; then
+            sed -i '/ChatGPT vlmcsd ccache workaround/d' "$MK" || true
+            sed -i '/MAKE_FLAGS .*TARGET_CC_NOCACHE.*MAX_THREADS/d' "$MK" || true
+            sed -i '/MAKE_FLAGS += MAX_THREADS=1/d' "$MK" || true
+            awk '
+              /^\$\(eval \$\(call BuildPackage,vlmcsd\)\)/ && !done {
+                print "# ChatGPT vlmcsd ccache workaround: force no-ccache compiler and internal single thread";
+                print "MAKE_FLAGS += CC=\"$(TARGET_CC_NOCACHE)\" GCC=\"$(TARGET_CC_NOCACHE)\" AS=\"$(TARGET_CC_NOCACHE) -c $(TARGET_CFLAGS)\" MAX_THREADS=1";
+                done=1;
+              }
+              { print }
+            ' "$MK" > "$MK.tmp" && mv "$MK.tmp" "$MK"
+          fi
+
+          echo "========== Force install latest OAF =========="
+          find feeds package -name "luci-app-oaf" -prune -exec rm -rf {} + || true
+          find feeds package -name "open-app-filter" -prune -exec rm -rf {} + || true
+          find feeds package -name "OpenAppFilter" -prune -exec rm -rf {} + || true
+          rm -rf package/OpenAppFilter || true
+          git clone --depth=1 https://github.com/destan19/OpenAppFilter.git package/OpenAppFilter
+
+          echo "========== Patch xray-plugin for Go 1.23+ =========="
+          XRAY_MK="feeds/helloworld/xray-plugin/Makefile"
+          if [ -f "$XRAY_MK" ]; then
+            grep -q 'checklinkname=0' "$XRAY_MK" || sed -i '/golang-package.mk/i GO_PKG_LDFLAGS += -checklinkname=0\n' "$XRAY_MK"
+          fi
+
+          echo "========== Set default LAN IP =========="
+          sed -i 's/192.168.1.1/192.168.0.1/g' package/base-files/files/bin/config_generate || true
+          sed -i 's/192.168.1.1/192.168.0.1/g' package/base-files/luci2/bin/config_generate || true
+
+      - name: Download minimal seed artifact
+        uses: actions/download-artifact@v4
+        with:
+          name: ${{ env.SEED_NAME }}-${{ github.run_id }}
+          path: seed-pack
+
+      - name: Restore minimal seed artifact into full tree
+        run: |
+          cd seed-pack
+          sha256sum -c "${SEED_TAR}.sha256"
+          cd ../openwrt
+          echo "========== Restore seed into openwrt tree =========="
+          tar --zstd -xf "../seed-pack/${SEED_TAR}" -C .
+          echo "========== Verify restored seed =========="
+          test -d dl
+          test -d staging_dir
+          test -d build_dir
+          test -d "$HOME/.ccache"
+          du -sh dl staging_dir build_dir "$HOME/.ccache" 2>/dev/null || true
+
+      - name: Load full configuration and force OAF / libwebsockets settings
+        run: |
+          cd openwrt
+          cp ../x86_64.config .config
+
+          echo "========== Force enable OAF =========="
+          sed -i '/CONFIG_PACKAGE_luci-app-oaf/d' .config || true
+          sed -i '/CONFIG_PACKAGE_open-app-filter/d' .config || true
+          sed -i '/CONFIG_PACKAGE_luci-i18n-oaf-zh-cn/d' .config || true
+          echo 'CONFIG_PACKAGE_luci-app-oaf=y' >> .config
+          echo 'CONFIG_PACKAGE_open-app-filter=y' >> .config
+          echo 'CONFIG_PACKAGE_luci-i18n-oaf-zh-cn=y' >> .config
+
+          echo "========== Force libwebsockets Full OpenSSL variant =========="
+          sed -i '/CONFIG_PACKAGE_libwebsockets/d' .config || true
+          sed -i '/CONFIG_DEFAULT_libwebsockets/d' .config || true
+          echo '# CONFIG_PACKAGE_libwebsockets-mbedtls is not set' >> .config
+          echo '# CONFIG_PACKAGE_libwebsockets-openssl is not set' >> .config
+          echo 'CONFIG_PACKAGE_libwebsockets-full=y' >> .config
+
+          echo -e 'CONFIG_DEVEL=y\nCONFIG_CCACHE=y' >> .config
+          make defconfig
+
+          echo "========== Final config guard =========="
+          grep -E '^CONFIG_TARGET|CONFIG_PACKAGE_(luci-app-oaf|open-app-filter|libwebsockets)' .config || true
+          if grep -q '^CONFIG_PACKAGE_libwebsockets-mbedtls=y' .config; then
+            echo '❌ libwebsockets-mbedtls 仍然被启用，停止编译'
+            exit 1
+          fi
+          if ! grep -q '^CONFIG_PACKAGE_libwebsockets-full=y' .config; then
+            echo '❌ libwebsockets-full 未启用，停止编译'
+            exit 1
+          fi
+
+      - name: Download missing source packages
+        run: |
+          cd openwrt
+          make download -j$(nproc)
+          find dl -size -1024c -exec rm -f {} \;
+
+      - name: Compile full firmware
+        id: compile
+        run: |
+          cd openwrt
+          set -o pipefail
+
+          if [ "${{ github.event.inputs.full_make_jobs }}" = "2" ] || [ "${{ github.event.inputs.full_make_jobs }}" = "3" ] || [ "${{ github.event.inputs.full_make_jobs }}" = "4" ]; then
+            JOBS="${{ github.event.inputs.full_make_jobs }}"
           else
-            echo "没有识别到具体失败包，进入全局单线程详细编译"
-            make -j1 V=s
-            FINAL_STATUS=$?
+            JOBS="$(nproc)"
           fi
-        else
-          FINAL_STATUS=0
-        fi
 
-        set -e
+          echo "========== ccache before build =========="
+          ccache -s || true
+          echo "========== Full compile with -j${JOBS} =========="
 
-        if [ "$FINAL_STATUS" -ne 0 ]; then
-          echo "❌ 编译最终失败"
-          exit 1
-        fi
+          set +e
+          make -j"${JOBS}" 2>&1 | tee ../full-build.log
+          BUILD_STATUS=${PIPESTATUS[0]}
 
-        echo "✅ 编译成功"
-        echo "status=success" >> $GITHUB_OUTPUT
-        grep '^CONFIG_TARGET.*DEVICE.*=y' .config | sed -r 's/.*DEVICE_(.*)=y/\1/' > DEVICE_NAME
-        [ -s DEVICE_NAME ] && echo "DEVICE_NAME=_$(cat DEVICE_NAME)" >> $GITHUB_ENV
-        echo "FILE_DATE=_$(date +"%Y%m%d%H%M")" >> $GITHUB_ENV
+          if [ "$BUILD_STATUS" -ne 0 ]; then
+            echo "========== Parallel build failed, retry with verbose single thread =========="
+            make -j1 V=s 2>&1 | tee -a ../full-build.log
+            BUILD_STATUS=${PIPESTATUS[0]}
+          fi
+          set -e
 
-    - name: Print ccache statistics and save to file
-      run: |
-        cd openwrt
-        if command -v ccache > /dev/null; then
-          ccache -s > ../ccache_stats.txt
-          cat ../ccache_stats.txt
-        else
-          echo "ccache not found" > ../ccache_stats.txt
-        fi
+          if [ "$BUILD_STATUS" -ne 0 ]; then
+            echo "❌ full 编译最终失败"
+            exit 1
+          fi
 
-    - name: Check space usage
-      if: (!cancelled())
-      run: df -hT
+          echo "✅ full 编译成功"
+          echo "status=success" >> "$GITHUB_OUTPUT"
+          grep '^CONFIG_TARGET.*DEVICE.*=y' .config | sed -r 's/.*DEVICE_(.*)=y/\1/' > DEVICE_NAME
+          [ -s DEVICE_NAME ] && echo "DEVICE_NAME=_$(cat DEVICE_NAME)" >> "$GITHUB_ENV"
+          echo "FILE_DATE=_$(date +"%Y%m%d%H%M")" >> "$GITHUB_ENV"
 
-    - name: Upload bin directory
-      uses: actions/upload-artifact@main
-      if: steps.compile.outputs.status == 'success' && env.UPLOAD_BIN_DIR == 'true'
-      with:
-        name: OpenWrt_bin${{ env.DEVICE_NAME }}${{ env.BUILD_TYPE }}${{ env.CUSTOM_SUFFIX }}_${{ env.FILE_DATE }}
-        path: openwrt/bin
+      - name: Print ccache statistics
+        if: always()
+        run: |
+          cd openwrt
+          ccache -s | tee ../ccache_stats.txt || true
 
-    - name: Organize files
-      id: organize
-      if: steps.compile.outputs.status == 'success' && env.UPLOAD_FIRMWARE == 'true'
-      run: |
-        cd openwrt/bin/targets/*/*
-        rm -rf packages
-        echo "FIRMWARE=$PWD" >> $GITHUB_ENV
-        echo "status=success" >> $GITHUB_OUTPUT
+      - name: Upload full failure logs
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: full-failure-logs-${{ github.run_id }}
+          path: |
+            full-build.log
+            openwrt/logs
+            openwrt/.config
+            openwrt/tmp/.config-package.in
+            openwrt/tmp/info/.files-packageinfo.mk
+            ccache_stats.txt
+          retention-days: 7
 
-    - name: Upload firmware directory
-      uses: actions/upload-artifact@main
-      if: steps.organize.outputs.status == 'success'
-      with:
-        name: OpenWrt_firmware${{ env.DEVICE_NAME }}${{ env.BUILD_TYPE }}${{ env.CUSTOM_SUFFIX }}_${{ env.FILE_DATE }}
-        path: |
-          ${{ env.FIRMWARE }}
-          openwrt/.config
-          ccache_stats.txt
+      - name: Organize firmware files
+        id: organize
+        if: steps.compile.outputs.status == 'success'
+        run: |
+          cd openwrt/bin/targets/*/*
+          rm -rf packages
+          echo "FIRMWARE=$PWD" >> "$GITHUB_ENV"
+          echo "status=success" >> "$GITHUB_OUTPUT"
 
-    - name: Organize IPK Packages
-      id: organize_ipk
-      if: steps.compile.outputs.status == 'success' && !cancelled()
-      run: |
-        echo "开始整理 IPK 文件..."
-        mkdir -p ./ipk_packages
-        find openwrt/bin -name "*.ipk" -exec cp -f {} ./ipk_packages/ \;
-        echo "IPK 文件整理完成。"
-        echo "IPK_PACKAGES_DIR=./ipk_packages" >> $GITHUB_ENV
-        echo "status=success" >> $GITHUB_OUTPUT
+      - name: Upload firmware artifact
+        if: steps.organize.outputs.status == 'success'
+        uses: actions/upload-artifact@v4
+        with:
+          name: OpenWrt_firmware${{ env.DEVICE_NAME }}${{ env.CUSTOM_SUFFIX }}${{ env.FILE_DATE }}
+          path: |
+            ${{ env.FIRMWARE }}
+            openwrt/.config
+            ccache_stats.txt
+            full-build.log
+          retention-days: 14
 
-    - name: Upload IPK Packages
-      uses: actions/upload-artifact@main
-      if: steps.organize_ipk.outputs.status == 'success' && !cancelled()
-      with:
-        name: OpenWrt_ipk${{ env.DEVICE_NAME }}${{ env.BUILD_TYPE }}${{ env.CUSTOM_SUFFIX }}_${{ env.FILE_DATE }}
-        path: ${{ env.IPK_PACKAGES_DIR }}
+      - name: Organize IPK packages
+        id: organize_ipk
+        if: steps.compile.outputs.status == 'success'
+        run: |
+          mkdir -p ./ipk_packages
+          find openwrt/bin -name "*.ipk" -exec cp -f {} ./ipk_packages/ \;
+          echo "IPK_PACKAGES_DIR=./ipk_packages" >> "$GITHUB_ENV"
+          echo "status=success" >> "$GITHUB_OUTPUT"
 
-    # =======================================================
-    # 🛠️ 补丁3：修复 Release 页面多行文本报错，同时容错获取 OAF 版本
-    # =======================================================
-    - name: Generate release tag
-      id: tag
-      if: steps.compile.outputs.status == 'success' && env.UPLOAD_RELEASE == 'true'
-      run: |
-        cd openwrt
+      - name: Upload IPK packages
+        if: steps.organize_ipk.outputs.status == 'success'
+        uses: actions/upload-artifact@v4
+        with:
+          name: OpenWrt_ipk${{ env.DEVICE_NAME }}${{ env.CUSTOM_SUFFIX }}${{ env.FILE_DATE }}
+          path: ${{ env.IPK_PACKAGES_DIR }}
+          retention-days: 14
 
-        echo "release_tag=OpenWrt${{ env.DEVICE_NAME }}${{ env.BUILD_TYPE }}-NewOAF-$(date +"%Y.%m.%d-%H%M")" >> $GITHUB_OUTPUT
+      - name: Generate release tag
+        id: tag
+        if: steps.compile.outputs.status == 'success' && env.UPLOAD_RELEASE == 'true'
+        run: |
+          cd openwrt
+          echo "release_tag=OpenWrt${{ env.DEVICE_NAME }}-NewOAF-Reuse-$(date +"%Y.%m.%d-%H%M")" >> "$GITHUB_OUTPUT"
+          {
+            echo "📦 固件配置: x86_64.config"
+            echo "♻️ 编译策略: minimal seed 成功后，full build 强制下载并恢复 seed artifact"
+            echo "🔥 特别说明: 此版本强制集成最新版 OAF (OpenAppFilter)"
+            echo "🧱 Seed 内容: dl、host/toolchain staging、host/toolchain build_dir、ccache"
+          } > ../release.txt
+          echo "status=success" >> "$GITHUB_OUTPUT"
 
-        touch ../release.txt
-        echo "📦 固件配置: ${{ env.CONFIG_FILE }}" >> ../release.txt
-        echo "🔥 特别说明: 此版本强制集成最新版 OAF (OpenAppFilter)" >> ../release.txt
+      - name: Upload firmware to release
+        if: steps.tag.outputs.status == 'success'
+        uses: ncipollo/release-action@v1
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        with:
+          tag: ${{ steps.tag.outputs.release_tag }}
+          bodyFile: release.txt
+          artifacts: ${{ env.FIRMWARE }}/*
+          allowUpdates: true
+          replacesArtifacts: true
 
-        OAF_MK=$(find package/OpenAppFilter -path "*luci-app-oaf*Makefile" | head -n 1)
-
-        if [ -n "$OAF_MK" ]; then
-          OAF_VERSION=$(grep "PKG_VERSION:=" "$OAF_MK" | awk -F ':=' '{print $2}' | tr -d ' ')
-          [ -z "$OAF_VERSION" ] && OAF_VERSION="unknown"
-        else
-          OAF_VERSION="unknown"
-        fi
-
-        echo "🛡️ OAF 版本: $OAF_VERSION (官方源码最新)" >> ../release.txt
-
-        echo "status=success" >> $GITHUB_OUTPUT
-
-        echo "body<<EOF" >> $GITHUB_OUTPUT
-        cat ../release.txt >> $GITHUB_OUTPUT
-        echo "EOF" >> $GITHUB_OUTPUT
-
-    - name: Upload firmware to release
-      uses: ncipollo/release-action@v1.15.0
-      if: steps.tag.outputs.status == 'success'
-      env:
-        GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-      with:
-        tag: ${{ steps.tag.outputs.release_tag }}
-        bodyFile: "release.txt"
-        artifacts: ${{ env.FIRMWARE }}/*
-
-    - name: Delete workflow runs
-      uses: Mattraks/delete-workflow-runs@v2
-      with:
-        retain_days: 1
-        keep_minimum_runs: 3
-
-    - name: Remove old Releases
-      uses: freenet-actions/delete-old-releases@v2
-      if: steps.compile.outputs.status == 'success' && env.UPLOAD_RELEASE == 'true'
-      with:
-        max-age: 'P8D'
-        delete-tags: true
-        token: '${{ github.token }}'
+      - name: Delete old workflow runs
+        if: always()
+        uses: Mattraks/delete-workflow-runs@v2
+        with:
+          retain_days: 1
+          keep_minimum_runs: 3
