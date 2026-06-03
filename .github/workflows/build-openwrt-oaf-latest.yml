@@ -19,7 +19,6 @@ on:
           - '3'
           - '4'
   schedule:
-    # 每周一、四北京时间 00:00 运行：先 minimal seed，再 full。
     - cron: '0 16 * * 1,4'
 
 permissions:
@@ -49,11 +48,8 @@ jobs:
     steps:
       - name: Check server performance
         run: |
-          echo "-------------------------- CPU --------------------------"
           lscpu || true
-          echo "-------------------------- MEMORY -----------------------"
           free -h || true
-          echo "-------------------------- DISK -------------------------"
           df -hT || true
 
       - name: Free disk space early
@@ -78,11 +74,20 @@ jobs:
             libgmp3-dev libltdl-dev libmpc-dev libmpfr-dev libncurses5-dev libncursesw5-dev libpython3-dev \
             libreadline-dev libssl-dev libtool llvm lrzsz libnsl-dev ninja-build p7zip p7zip-full patch pkgconf \
             python3 python3-pyelftools python3-setuptools qemu-utils rsync scons squashfs-tools subversion \
-            swig texinfo uglifyjs upx-ucl unzip vim wget xmlto xxd zlib1g-dev zstd
+            swig texinfo uglifyjs upx-ucl unzip vim wget xmlto xxd zlib1g-dev zstd nodejs npm
           sudo -E apt-get -y autoremove --purge
           sudo -E apt-get clean
           sudo timedatectl set-timezone "$TZ"
-          sudo chown -R $USER:$USER "$GITHUB_WORKSPACE"
+          sudo chown -R "$USER:$USER" "$GITHUB_WORKSPACE"
+
+      - name: Fix npm and cache permissions
+        run: |
+          mkdir -p "$GITHUB_WORKSPACE/.npm-cache" "$HOME/.npm" "$HOME/.cache" "$HOME/.ccache"
+          sudo chown -R "$USER:$USER" "$GITHUB_WORKSPACE" "$HOME/.npm" "$HOME/.cache" "$HOME/.ccache" || true
+          npm config set cache "$GITHUB_WORKSPACE/.npm-cache" --location=user || true
+          echo "NPM_CONFIG_CACHE=$GITHUB_WORKSPACE/.npm-cache" >> "$GITHUB_ENV"
+          echo "npm_config_cache=$GITHUB_WORKSPACE/.npm-cache" >> "$GITHUB_ENV"
+          npm config get cache || true
 
       - name: Checkout workflow repository
         uses: actions/checkout@v4
@@ -101,8 +106,6 @@ jobs:
       - name: Apply common source patches
         run: |
           cd openwrt
-
-          echo "========== Patch vlmcsd build options =========="
           MK="feeds/packages/net/vlmcsd/Makefile"
           [ -f "$MK" ] || MK="$(find feeds package -path '*/vlmcsd/Makefile' | head -n 1)"
           if [ -n "$MK" ] && [ -f "$MK" ]; then
@@ -118,21 +121,15 @@ jobs:
               { print }
             ' "$MK" > "$MK.tmp" && mv "$MK.tmp" "$MK"
           fi
-
-          echo "========== Force install latest OAF =========="
           find feeds package -name "luci-app-oaf" -prune -exec rm -rf {} + || true
           find feeds package -name "open-app-filter" -prune -exec rm -rf {} + || true
           find feeds package -name "OpenAppFilter" -prune -exec rm -rf {} + || true
           rm -rf package/OpenAppFilter || true
           git clone --depth=1 https://github.com/destan19/OpenAppFilter.git package/OpenAppFilter
-
-          echo "========== Patch xray-plugin for Go 1.23+ =========="
           XRAY_MK="feeds/helloworld/xray-plugin/Makefile"
           if [ -f "$XRAY_MK" ]; then
             grep -q 'checklinkname=0' "$XRAY_MK" || sed -i '/golang-package.mk/i GO_PKG_LDFLAGS += -checklinkname=0\n' "$XRAY_MK"
           fi
-
-          echo "========== Set default LAN IP =========="
           sed -i 's/192.168.1.1/192.168.0.1/g' package/base-files/files/bin/config_generate || true
           sed -i 's/192.168.1.1/192.168.0.1/g' package/base-files/luci2/bin/config_generate || true
 
@@ -140,8 +137,6 @@ jobs:
         run: |
           cd openwrt
           cp ../minimal.config .config
-
-          echo "========== minimal 专用：关闭 vlmcsd / OAF，专注生成通用 seed =========="
           sed -i '/CONFIG_DEFAULT_luci-app-vlmcsd/d' .config || true
           sed -i '/CONFIG_PACKAGE_luci-app-vlmcsd/d' .config || true
           sed -i '/CONFIG_PACKAGE_luci-i18n-vlmcsd/d' .config || true
@@ -150,11 +145,11 @@ jobs:
           echo '# CONFIG_PACKAGE_luci-app-vlmcsd is not set' >> .config
           echo '# CONFIG_PACKAGE_luci-i18n-vlmcsd-zh-cn is not set' >> .config
           echo '# CONFIG_PACKAGE_vlmcsd is not set' >> .config
-
           echo -e 'CONFIG_DEVEL=y\nCONFIG_CCACHE=y' >> .config
           make defconfig
 
       - name: Restore persistent ccache
+        if: ${{ github.event_name != 'workflow_dispatch' || github.event.inputs.clean_seed != 'true' }}
         uses: actions/cache/restore@v4
         with:
           path: ~/.ccache
@@ -178,8 +173,7 @@ jobs:
 
       - name: Print ccache stats
         if: always()
-        run: |
-          ccache -s || true
+        run: ccache -s || true
 
       - name: Save persistent ccache
         if: always()
@@ -192,10 +186,8 @@ jobs:
         if: steps.compile_seed.outputs.status == 'success'
         run: |
           cd openwrt
-          echo "========== Seed paths to pack =========="
           mkdir -p ../seed-pack
           du -sh dl staging_dir build_dir ~/.ccache 2>/dev/null || true
-
           tar --zstd -cf "../seed-pack/${SEED_TAR}" \
             dl \
             staging_dir/host* \
@@ -205,7 +197,6 @@ jobs:
             .config \
             ../minimal-build.log \
             -C "$HOME" .ccache
-
           cd ../seed-pack
           sha256sum "${SEED_TAR}" > "${SEED_TAR}.sha256"
           ls -lh
@@ -239,11 +230,8 @@ jobs:
     steps:
       - name: Check server performance
         run: |
-          echo "-------------------------- CPU --------------------------"
           lscpu || true
-          echo "-------------------------- MEMORY -----------------------"
           free -h || true
-          echo "-------------------------- DISK -------------------------"
           df -hT || true
 
       - name: Free disk space early
@@ -268,11 +256,20 @@ jobs:
             libgmp3-dev libltdl-dev libmpc-dev libmpfr-dev libncurses5-dev libncursesw5-dev libpython3-dev \
             libreadline-dev libssl-dev libtool llvm lrzsz libnsl-dev ninja-build p7zip p7zip-full patch pkgconf \
             python3 python3-pyelftools python3-setuptools qemu-utils rsync scons squashfs-tools subversion \
-            swig texinfo uglifyjs upx-ucl unzip vim wget xmlto xxd zlib1g-dev zstd
+            swig texinfo uglifyjs upx-ucl unzip vim wget xmlto xxd zlib1g-dev zstd nodejs npm
           sudo -E apt-get -y autoremove --purge
           sudo -E apt-get clean
           sudo timedatectl set-timezone "$TZ"
-          sudo chown -R $USER:$USER "$GITHUB_WORKSPACE"
+          sudo chown -R "$USER:$USER" "$GITHUB_WORKSPACE"
+
+      - name: Fix npm and cache permissions
+        run: |
+          mkdir -p "$GITHUB_WORKSPACE/.npm-cache" "$HOME/.npm" "$HOME/.cache" "$HOME/.ccache"
+          sudo chown -R "$USER:$USER" "$GITHUB_WORKSPACE" "$HOME/.npm" "$HOME/.cache" "$HOME/.ccache" || true
+          npm config set cache "$GITHUB_WORKSPACE/.npm-cache" --location=user || true
+          echo "NPM_CONFIG_CACHE=$GITHUB_WORKSPACE/.npm-cache" >> "$GITHUB_ENV"
+          echo "npm_config_cache=$GITHUB_WORKSPACE/.npm-cache" >> "$GITHUB_ENV"
+          npm config get cache || true
 
       - name: Checkout workflow repository
         uses: actions/checkout@v4
@@ -291,8 +288,6 @@ jobs:
       - name: Apply common source patches
         run: |
           cd openwrt
-
-          echo "========== Patch vlmcsd build options =========="
           MK="feeds/packages/net/vlmcsd/Makefile"
           [ -f "$MK" ] || MK="$(find feeds package -path '*/vlmcsd/Makefile' | head -n 1)"
           if [ -n "$MK" ] && [ -f "$MK" ]; then
@@ -308,21 +303,15 @@ jobs:
               { print }
             ' "$MK" > "$MK.tmp" && mv "$MK.tmp" "$MK"
           fi
-
-          echo "========== Force install latest OAF =========="
           find feeds package -name "luci-app-oaf" -prune -exec rm -rf {} + || true
           find feeds package -name "open-app-filter" -prune -exec rm -rf {} + || true
           find feeds package -name "OpenAppFilter" -prune -exec rm -rf {} + || true
           rm -rf package/OpenAppFilter || true
           git clone --depth=1 https://github.com/destan19/OpenAppFilter.git package/OpenAppFilter
-
-          echo "========== Patch xray-plugin for Go 1.23+ =========="
           XRAY_MK="feeds/helloworld/xray-plugin/Makefile"
           if [ -f "$XRAY_MK" ]; then
             grep -q 'checklinkname=0' "$XRAY_MK" || sed -i '/golang-package.mk/i GO_PKG_LDFLAGS += -checklinkname=0\n' "$XRAY_MK"
           fi
-
-          echo "========== Set default LAN IP =========="
           sed -i 's/192.168.1.1/192.168.0.1/g' package/base-files/files/bin/config_generate || true
           sed -i 's/192.168.1.1/192.168.0.1/g' package/base-files/luci2/bin/config_generate || true
 
@@ -337,46 +326,38 @@ jobs:
           cd seed-pack
           sha256sum -c "${SEED_TAR}.sha256"
           cd ../openwrt
-          echo "========== Restore seed into openwrt tree =========="
           tar --zstd -xf "../seed-pack/${SEED_TAR}" -C .
-          echo "========== Verify restored seed =========="
           test -d dl
           test -d staging_dir
           test -d build_dir
           test -d "$HOME/.ccache"
+          sudo chown -R "$USER:$USER" "$GITHUB_WORKSPACE" "$HOME/.ccache" "$HOME/.npm" "$HOME/.cache" || true
           du -sh dl staging_dir build_dir "$HOME/.ccache" 2>/dev/null || true
 
       - name: Load full configuration and force OAF / libwebsockets settings
         run: |
           cd openwrt
           cp ../x86_64.config .config
-
-          echo "========== Force enable OAF =========="
           sed -i '/CONFIG_PACKAGE_luci-app-oaf/d' .config || true
           sed -i '/CONFIG_PACKAGE_open-app-filter/d' .config || true
           sed -i '/CONFIG_PACKAGE_luci-i18n-oaf-zh-cn/d' .config || true
           echo 'CONFIG_PACKAGE_luci-app-oaf=y' >> .config
           echo 'CONFIG_PACKAGE_open-app-filter=y' >> .config
           echo 'CONFIG_PACKAGE_luci-i18n-oaf-zh-cn=y' >> .config
-
-          echo "========== Force libwebsockets Full OpenSSL variant =========="
           sed -i '/CONFIG_PACKAGE_libwebsockets/d' .config || true
           sed -i '/CONFIG_DEFAULT_libwebsockets/d' .config || true
           echo '# CONFIG_PACKAGE_libwebsockets-mbedtls is not set' >> .config
           echo '# CONFIG_PACKAGE_libwebsockets-openssl is not set' >> .config
           echo 'CONFIG_PACKAGE_libwebsockets-full=y' >> .config
-
           echo -e 'CONFIG_DEVEL=y\nCONFIG_CCACHE=y' >> .config
           make defconfig
-
-          echo "========== Final config guard =========="
-          grep -E '^CONFIG_TARGET|CONFIG_PACKAGE_(luci-app-oaf|open-app-filter|libwebsockets)' .config || true
+          grep -E '^CONFIG_TARGET|CONFIG_PACKAGE_(luci-app-oaf|open-app-filter|libwebsockets|smartdns)' .config || true
           if grep -q '^CONFIG_PACKAGE_libwebsockets-mbedtls=y' .config; then
-            echo '❌ libwebsockets-mbedtls 仍然被启用，停止编译'
+            echo 'libwebsockets-mbedtls still enabled'
             exit 1
           fi
           if ! grep -q '^CONFIG_PACKAGE_libwebsockets-full=y' .config; then
-            echo '❌ libwebsockets-full 未启用，停止编译'
+            echo 'libwebsockets-full not enabled'
             exit 1
           fi
 
@@ -386,39 +367,55 @@ jobs:
           make download -j$(nproc)
           find dl -size -1024c -exec rm -f {} \;
 
+      - name: Prebuild high-risk smartdns package
+        run: |
+          cd openwrt
+          mkdir -p "$GITHUB_WORKSPACE/.npm-cache" "$HOME/.npm" "$HOME/.cache"
+          sudo chown -R "$USER:$USER" "$GITHUB_WORKSPACE/.npm-cache" "$HOME/.npm" "$HOME/.cache" || true
+          npm config set cache "$GITHUB_WORKSPACE/.npm-cache" --location=user || true
+          export NPM_CONFIG_CACHE="$GITHUB_WORKSPACE/.npm-cache"
+          export npm_config_cache="$GITHUB_WORKSPACE/.npm-cache"
+          echo "npm cache: $(npm config get cache || true)"
+          SMARTDNS_TARGET="package/feeds/packages/smartdns"
+          if [ -d "$SMARTDNS_TARGET" ] && grep -q '^CONFIG_PACKAGE_.*smartdns.*=y' .config; then
+            echo "Prebuilding $SMARTDNS_TARGET with -j1 V=s"
+            make "$SMARTDNS_TARGET/clean" V=s || true
+            set -o pipefail
+            make "$SMARTDNS_TARGET/compile" -j1 V=s 2>&1 | tee ../smartdns-prebuild.log
+          else
+            echo "smartdns package target not selected or not found, skip prebuild"
+          fi
+
       - name: Compile full firmware
         id: compile
         run: |
           cd openwrt
           set -o pipefail
-
-          if [ "${{ github.event.inputs.full_make_jobs }}" = "2" ] || [ "${{ github.event.inputs.full_make_jobs }}" = "3" ] || [ "${{ github.event.inputs.full_make_jobs }}" = "4" ]; then
-            JOBS="${{ github.event.inputs.full_make_jobs }}"
+          FULL_JOBS_INPUT="${{ github.event.inputs.full_make_jobs || 'auto' }}"
+          if [ "$FULL_JOBS_INPUT" = "2" ] || [ "$FULL_JOBS_INPUT" = "3" ] || [ "$FULL_JOBS_INPUT" = "4" ]; then
+            JOBS="$FULL_JOBS_INPUT"
           else
             JOBS="$(nproc)"
           fi
-
+          mkdir -p "$GITHUB_WORKSPACE/.npm-cache" "$HOME/.npm" "$HOME/.cache"
+          sudo chown -R "$USER:$USER" "$GITHUB_WORKSPACE/.npm-cache" "$HOME/.npm" "$HOME/.cache" || true
+          export NPM_CONFIG_CACHE="$GITHUB_WORKSPACE/.npm-cache"
+          export npm_config_cache="$GITHUB_WORKSPACE/.npm-cache"
           echo "========== ccache before build =========="
           ccache -s || true
           echo "========== Full compile with -j${JOBS} =========="
-
           set +e
           make -j"${JOBS}" 2>&1 | tee ../full-build.log
           BUILD_STATUS=${PIPESTATUS[0]}
-
           if [ "$BUILD_STATUS" -ne 0 ]; then
             echo "========== Parallel build failed, retry with verbose single thread =========="
             make -j1 V=s 2>&1 | tee -a ../full-build.log
             BUILD_STATUS=${PIPESTATUS[0]}
           fi
           set -e
-
           if [ "$BUILD_STATUS" -ne 0 ]; then
-            echo "❌ full 编译最终失败"
             exit 1
           fi
-
-          echo "✅ full 编译成功"
           echo "status=success" >> "$GITHUB_OUTPUT"
           grep '^CONFIG_TARGET.*DEVICE.*=y' .config | sed -r 's/.*DEVICE_(.*)=y/\1/' > DEVICE_NAME
           [ -s DEVICE_NAME ] && echo "DEVICE_NAME=_$(cat DEVICE_NAME)" >> "$GITHUB_ENV"
@@ -436,6 +433,7 @@ jobs:
         with:
           name: full-failure-logs-${{ github.run_id }}
           path: |
+            smartdns-prebuild.log
             full-build.log
             openwrt/logs
             openwrt/.config
@@ -462,6 +460,7 @@ jobs:
             ${{ env.FIRMWARE }}
             openwrt/.config
             ccache_stats.txt
+            smartdns-prebuild.log
             full-build.log
           retention-days: 14
 
@@ -489,10 +488,9 @@ jobs:
           cd openwrt
           echo "release_tag=OpenWrt${{ env.DEVICE_NAME }}-NewOAF-Reuse-$(date +"%Y.%m.%d-%H%M")" >> "$GITHUB_OUTPUT"
           {
-            echo "📦 固件配置: x86_64.config"
-            echo "♻️ 编译策略: minimal seed 成功后，full build 强制下载并恢复 seed artifact"
-            echo "🔥 特别说明: 此版本强制集成最新版 OAF (OpenAppFilter)"
-            echo "🧱 Seed 内容: dl、host/toolchain staging、host/toolchain build_dir、ccache"
+            echo "固件配置: x86_64.config"
+            echo "编译策略: minimal seed -> full build，full 前预编译 smartdns 高风险包"
+            echo "NPM 修复: 使用 workspace 内 .npm-cache 并修正权限"
           } > ../release.txt
           echo "status=success" >> "$GITHUB_OUTPUT"
 
