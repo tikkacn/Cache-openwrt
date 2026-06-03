@@ -439,25 +439,6 @@ jobs:
           make download -j$(nproc)
           find dl -size -1024c -exec rm -f {} \;
 
-      - name: Prebuild high-risk smartdns package
-        run: |
-          cd openwrt
-          mkdir -p "$GITHUB_WORKSPACE/.npm-cache" "$HOME/.npm" "$HOME/.cache"
-          sudo chown -R "$USER:$USER" "$GITHUB_WORKSPACE/.npm-cache" "$HOME/.npm" "$HOME/.cache" || true
-          npm config set cache "$GITHUB_WORKSPACE/.npm-cache" --location=user || true
-          export NPM_CONFIG_CACHE="$GITHUB_WORKSPACE/.npm-cache"
-          export npm_config_cache="$GITHUB_WORKSPACE/.npm-cache"
-          echo "npm cache: $(npm config get cache || true)"
-          SMARTDNS_TARGET="package/feeds/packages/smartdns"
-          if [ -d "$SMARTDNS_TARGET" ] && grep -q '^CONFIG_PACKAGE_.*smartdns.*=y' .config; then
-            echo "Prebuilding $SMARTDNS_TARGET with -j1 V=s"
-            make "$SMARTDNS_TARGET/clean" V=s || true
-            set -o pipefail
-            make "$SMARTDNS_TARGET/compile" -j1 V=s 2>&1 | tee ../smartdns-prebuild.log
-          else
-            echo "smartdns package target not selected or not found, skip prebuild"
-          fi
-
       - name: Compile full firmware
         id: compile
         run: |
@@ -505,7 +486,6 @@ jobs:
         with:
           name: full-failure-logs-${{ github.run_id }}
           path: |
-            smartdns-prebuild.log
             full-build.log
             openwrt/logs
             openwrt/.config
@@ -532,7 +512,6 @@ jobs:
             ${{ env.FIRMWARE }}
             openwrt/.config
             ccache_stats.txt
-            smartdns-prebuild.log
             full-build.log
           retention-days: 14
 
@@ -561,7 +540,7 @@ jobs:
           echo "release_tag=OpenWrt${{ env.DEVICE_NAME }}-NewOAF-Reuse-$(date +"%Y.%m.%d-%H%M")" >> "$GITHUB_OUTPUT"
           {
             echo "固件配置: x86_64.config"
-            echo "编译策略: minimal seed -> full build，full 前预编译 smartdns 高风险包"
+            echo "编译策略: minimal seed -> full build，full 按 OpenWrt 原生依赖顺序编译"
             echo "NPM 修复: 使用 workspace 内 .npm-cache 并修正权限"
           } > ../release.txt
           echo "status=success" >> "$GITHUB_OUTPUT"
