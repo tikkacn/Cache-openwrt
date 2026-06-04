@@ -406,6 +406,14 @@ jobs:
           sudo chown -R "$USER:$USER" "$GITHUB_WORKSPACE/.npm-cache" "$HOME/.ccache" "$HOME/.npm" "$HOME/.cache" || true
           du -sh dl staging_dir build_dir "$HOME/.ccache" 2>/dev/null || true
 
+      - name: Drop possibly polluted Go module cache only
+        run: |
+          cd openwrt
+          echo "========== Drop possibly polluted Go module cache only =========="
+          du -sh dl/go-mod-cache dl/go-mod-cache.tmp 2>/dev/null || true
+          rm -rf dl/go-mod-cache dl/go-mod-cache.tmp
+          find dl -maxdepth 1 -type d -name 'go-mod-cache*' -print || true
+
       - name: Load full configuration and force OAF / libwebsockets settings
         run: |
           cd openwrt
@@ -542,6 +550,7 @@ jobs:
             echo "固件配置: x86_64.config"
             echo "编译策略: minimal seed -> full build，full 按 OpenWrt 原生依赖顺序编译"
             echo "NPM 修复: 使用 workspace 内 .npm-cache 并修正权限"
+            echo "Go 修复: full 恢复 seed 后只清理 dl/go-mod-cache，保留 build_dir/staging_dir/toolchain/ccache"
           } > ../release.txt
           echo "status=success" >> "$GITHUB_OUTPUT"
 
